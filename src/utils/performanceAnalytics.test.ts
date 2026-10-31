@@ -9,16 +9,14 @@ import {
 import {
   computeNpsSummaryKPIs,
   computePerformanceKPIs,
+  evaluateAllStudentsAttendance,
   evaluateStudentAttendance,
-  extractRecordStartHour,
   filterAndSortRecords,
   filterNpsRecords,
   generateCsvContent,
   generateWhatsAppSummary,
-  groupByCourse,
   groupByHourKanban,
   groupByNpsHourKanban,
-  groupBySchedule,
   parseTimeToMinutes,
   FilterCriteria,
 } from './performanceAnalytics';
@@ -37,43 +35,43 @@ const defaultCriteria: FilterCriteria = {
   sortDir: 'asc',
 };
 
-test('PORTAL_METADATA and INITIAL_STUDENT_RECORDS match authentic Microlins portal dashboard (84 agendamentos, 20 presenças, 9 faltas, 55 não iniciados)', () => {
+test('PORTAL_METADATA and INITIAL_STUDENT_RECORDS match live Microlins portal dashboard (114 agendamentos, 71 presenças, 43 faltas)', () => {
   assert.equal(PORTAL_METADATA.usuarioNomeCompleto, 'João Pedro Pereira França');
-  assert.equal(PORTAL_METADATA.usuarioCargo, 'Educador');
+  assert.equal(PORTAL_METADATA.usuarioCargo, 'Auxiliar Pedagógico');
   assert.equal(PORTAL_METADATA.diaSemana, 'Sexta-feira');
 
-  // Ground truth: 84 total agendamentos on the portal dashboard
-  assert.equal(INITIAL_STUDENT_RECORDS.length, 84);
+  // Ground truth: 114 total agendamentos on the live portal dashboard
+  assert.equal(INITIAL_STUDENT_RECORDS.length, 114);
 
-  const evaluatedAt1405 = filterAndSortRecords(
+  const evaluatedAt2030 = evaluateAllStudentsAttendance(
     INITIAL_STUDENT_RECORDS,
-    defaultCriteria,
-    parseTimeToMinutes('14:05')
+    parseTimeToMinutes('20:30')
   );
-  assert.equal(evaluatedAt1405.length, 84);
+  assert.equal(evaluatedAt2030.length, 114);
 
-  const kpis = computePerformanceKPIs(evaluatedAt1405, parseTimeToMinutes('14:05'));
-  assert.equal(kpis.totalAgendamentos, 84);
+  const kpis = computePerformanceKPIs(evaluatedAt2030, parseTimeToMinutes('20:30'));
+  assert.equal(kpis.totalAgendamentos, 114);
 
-  // 20 presenças (17 FINALIZADO + 3 INICIADO)
-  assert.equal(kpis.presencaCount, 20);
-  assert.equal(kpis.finalizados, 17);
-  assert.equal(kpis.iniciados, 3);
+  // 71 presenças (62 FINALIZADO + 9 INICIADO)
+  assert.equal(kpis.presencaCount, 71);
+  assert.equal(kpis.finalizados, 62);
+  assert.equal(kpis.iniciados, 9);
 
-  // 9 faltas (aulas da manhã às 08h, 10h, 11h, 12h que NÃO iniciaram e cujo horário já passou)
-  assert.equal(kpis.faltaCount, 9);
+  // 43 faltas (aulas que NÃO iniciaram e cujo horário + 15 min de tolerância já expirou)
+  assert.equal(kpis.faltaCount, 43);
+  assert.equal(kpis.aguardandoCount, 0);
 
-  // 55 não iniciados (7 às 14h dentro da tolerância + 48 aulas da tarde e noite)
-  assert.equal(kpis.aguardandoCount, 55);
+  // Soma consistente: 71 + 43 + 0 = 114
+  assert.equal(
+    kpis.totalAgendamentos,
+    kpis.presencaCount + kpis.faltaCount + kpis.aguardandoCount
+  );
 
-  // Soma consistente: 20 + 9 + 55 = 84
-  assert.equal(kpis.totalAgendamentos, kpis.presencaCount + kpis.faltaCount + kpis.aguardandoCount);
-
-  // Média de frequência: 20 / (20 + 9) = 69.0%
-  assert.equal(kpis.mediaFrequencia, 69.0);
+  // Média de frequência: 71 / 114 = 62.3%
+  assert.equal(kpis.mediaFrequencia, 62.3);
 });
 
-test('Presence priority rule: initiated class ALWAYS receives Presença, never overridden by clock time', () => {
+test('Presence priority rule: initiated or finalized class ALWAYS receives Presença, never overridden by clock time', () => {
   const baseSample = INITIAL_STUDENT_RECORDS[0];
   const afternoonCompletedStudent: StudentPerformanceRecord = {
     ...baseSample,
@@ -89,96 +87,92 @@ test('Presence priority rule: initiated class ALWAYS receives Presença, never o
   };
 
   // Even if evaluated at 08:00 (before 16:00), the student already initiated/finished the class: PRESENÇA!
-  const evalAt08 = evaluateStudentAttendance(afternoonCompletedStudent, parseTimeToMinutes('08:00'));
+  const evalAt08 = evaluateStudentAttendance(
+    afternoonCompletedStudent,
+    parseTimeToMinutes('08:00')
+  );
   assert.equal(evalAt08.attendanceStatus, 'Presença');
 
   // Even if evaluated at 14:00, PRESENÇA!
-  const evalAt14 = evaluateStudentAttendance(afternoonCompletedStudent, parseTimeToMinutes('14:00'));
+  const evalAt14 = evaluateStudentAttendance(
+    afternoonCompletedStudent,
+    parseTimeToMinutes('14:00')
+  );
   assert.equal(evalAt14.attendanceStatus, 'Presença');
 });
 
-test('Absence tolerance rule: uninitiated class receives Falta only after 15 min tolerance', () => {
+test('Absence tolerance rule: supports both :00 and :30 schedules with exact 15-minute tolerance', () => {
   const baseSample = INITIAL_STUDENT_RECORDS[0];
-  const class14h: StudentPerformanceRecord = {
+  const class1830: StudentPerformanceRecord = {
     ...baseSample,
     id: 992,
     contrato: '991002',
-    nomeCompleto: 'Aluno Aula 14h',
-    horario: '14:00 à 15:00',
-    horaInicio: '14:00',
-    horaFim: '15:00',
+    nomeCompleto: 'Aluno Aula 18h30',
+    horario: '18:30 à 19:30',
+    horaInicio: '18:30',
+    horaFim: '19:30',
     inicio: '',
     fim: '',
     status: 'NÃO INICIADO',
   };
 
-  // At 13:50 (before class) -> Não iniciado
-  const beforeClass = evaluateStudentAttendance(class14h, parseTimeToMinutes('13:50'));
+  // At 18:20 (before 18:30 class) -> Não iniciado
+  const beforeClass = evaluateStudentAttendance(
+    class1830,
+    parseTimeToMinutes('18:20')
+  );
   assert.equal(beforeClass.attendanceStatus, 'Não iniciado');
+  assert.equal(beforeClass.hourKey, '18h');
+  assert.equal(beforeClass.toleranceWindowLabel, '18:30 às 18:45');
 
-  // At 14:10 (within 15 min tolerance) -> Não iniciado (aguardando)
-  const duringTolerance = evaluateStudentAttendance(class14h, parseTimeToMinutes('14:10'));
+  // At 18:40 (within 18:30-18:45 tolerance) -> Não iniciado (aguardando)
+  const duringTolerance = evaluateStudentAttendance(
+    class1830,
+    parseTimeToMinutes('18:40')
+  );
   assert.equal(duringTolerance.attendanceStatus, 'Não iniciado');
   assert.equal(duringTolerance.isWithinTolerance, true);
 
-  // At 14:15 (tolerance expired without start) -> Falta!
-  const afterTolerance = evaluateStudentAttendance(class14h, parseTimeToMinutes('14:15'));
+  // At 18:45 (tolerance expired without start) -> Falta!
+  const afterTolerance = evaluateStudentAttendance(
+    class1830,
+    parseTimeToMinutes('18:45')
+  );
   assert.equal(afterTolerance.attendanceStatus, 'Falta');
   assert.equal(afterTolerance.isWithinTolerance, false);
 });
 
-test('Kanban colunas por horário: 14h é fixada como primeira coluna no horário de referência', () => {
-  const evaluated = filterAndSortRecords(
+test('Evasão rule: identified when student has > 2 schedules, 1 presence, and faltas in all others, and preserved across filters', () => {
+  const allEvaluated = evaluateAllStudentsAttendance(
     INITIAL_STUDENT_RECORDS,
-    defaultCriteria,
-    parseTimeToMinutes('14:05')
+    parseTimeToMinutes('20:30')
   );
 
-  const cols = groupByHourKanban(evaluated, 'AGENDADO', parseTimeToMinutes('14:05'));
-  assert.equal(cols.length, 11);
+  const kpis = computePerformanceKPIs(allEvaluated, parseTimeToMinutes('20:30'));
+  // Edson Antonio Fernandes Machado (#5049187) and Maria Lucia de Macêdo Souza (#5122561) both have 3 schedules with 1 presença and 2 faltas
+  assert.equal(kpis.evasaoCount, 2);
 
-  // First column is 14h and isCurrentHour is true
-  assert.equal(cols[0].hourKey, '14h');
-  assert.equal(cols[0].isCurrentHour, true);
-  assert.equal(cols[0].total, 7);
-
-  // 14h has 7 não iniciados (starting now in tolerance)
-  assert.equal(cols[0].naoIniciadoCount, 7);
-  assert.equal(cols[0].presencaCount, 0);
-  assert.equal(cols[0].faltaCount, 0);
-
-  // Morning columns have their presenças and faltas
-  const col08 = cols.find((c) => c.hourKey === '08h');
-  assert.ok(col08);
-  assert.equal(col08.presencaCount, 5);
-  assert.equal(col08.faltaCount, 3);
-  assert.equal(col08.naoIniciadoCount, 0);
-
-  const col09 = cols.find((c) => c.hourKey === '09h');
-  assert.ok(col09);
-  assert.equal(col09.presencaCount, 7);
-  assert.equal(col09.faltaCount, 0);
-  assert.equal(col09.naoIniciadoCount, 0);
-});
-
-test('Evasão rule: identified when student has > 2 schedules, 1 presence, and faltas in all others', () => {
-  const evaluated = filterAndSortRecords(
-    INITIAL_STUDENT_RECORDS,
-    defaultCriteria,
-    parseTimeToMinutes('14:05')
-  );
-
-  const kpis = computePerformanceKPIs(evaluated, parseTimeToMinutes('14:05'));
-  // Student Edson Antonio Fernandes Machado (5049187) has 3 morning schedules: 1 presença e 2 faltas -> Evasão
-  assert.equal(kpis.evasaoCount, 1);
-
-  const edson = evaluated.find((r) => r.contrato === '5049187');
+  const edson = allEvaluated.find((r) => r.contrato === '5049187');
   assert.ok(edson);
   assert.equal(edson.isEvasao, true);
   assert.ok(edson.evasaoSummary?.includes('1 presença e 2 faltas'));
+
+  const mariaLucia = allEvaluated.find((r) => r.contrato === '5122561');
+  assert.ok(mariaLucia);
+  assert.equal(mariaLucia.isEvasao, true);
+  assert.ok(mariaLucia.evasaoSummary?.includes('1 presença e 2 faltas'));
+
+  // Filtering by a single hour (15h) must preserve Maria Lucia's Evasão status
+  const filtered15h = filterAndSortRecords(
+    allEvaluated,
+    { ...defaultCriteria, horario: '15h' },
+    parseTimeToMinutes('20:30')
+  );
+  const kpis15h = computePerformanceKPIs(filtered15h, parseTimeToMinutes('20:30'));
+  assert.equal(kpis15h.evasaoCount, 1);
 });
 
-test('Strict NPS linking: 6 active invitations linked to Kanban students with proper Origem and Jornada', () => {
+test('Strict NPS linking: 6 active unanswered invitations linked to Kanban students (excluding students who already answered newer invites)', () => {
   assert.equal(INITIAL_ACTIVE_NPS_INVITATIONS.length, 6);
 
   const kanbanContracts = new Set(INITIAL_STUDENT_RECORDS.map((r) => r.contrato));
@@ -191,22 +185,25 @@ test('Strict NPS linking: 6 active invitations linked to Kanban students with pr
     );
   }
 
-  const roseane = INITIAL_ACTIVE_NPS_INVITATIONS.find((i) => i.contrato === '5127430');
-  assert.ok(roseane);
-  assert.equal(roseane.origem, 'E-mail');
-  assert.equal(roseane.pontoJornada, '30 dias');
-
-  const mariaLucia = INITIAL_ACTIVE_NPS_INVITATIONS.find((i) => i.contrato === '5122561');
-  assert.ok(mariaLucia);
-  assert.equal(mariaLucia.origem, 'Portal do Aluno');
-  assert.equal(mariaLucia.pontoJornada, '50 dias');
+  // Verify students who already answered newer invites (5113645, 5120391, 5108237) are NOT in active invitations
+  assert.equal(
+    INITIAL_ACTIVE_NPS_INVITATIONS.some((i) => i.contrato === '5113645'),
+    false
+  );
+  assert.equal(
+    INITIAL_ACTIVE_NPS_INVITATIONS.some((i) => i.contrato === '5120391'),
+    false
+  );
+  assert.equal(
+    INITIAL_ACTIVE_NPS_INVITATIONS.some((i) => i.contrato === '5108237'),
+    false
+  );
 });
 
-test('NPS tab exclusive KPIs: 6 convites únicos, origens e agendamentos vinculados', () => {
-  const allEvaluated = filterAndSortRecords(
+test('NPS tab exclusive KPIs: 6 convites únicos (5 Portal, 1 E-mail; 3 Jornada 30d, 3 Jornada 50+d) and 17 agendamentos vinculados', () => {
+  const allEvaluated = evaluateAllStudentsAttendance(
     INITIAL_STUDENT_RECORDS,
-    defaultCriteria,
-    parseTimeToMinutes('14:05')
+    parseTimeToMinutes('20:30')
   );
 
   const allNpsRecords = filterNpsRecords(allEvaluated, {
@@ -223,34 +220,37 @@ test('NPS tab exclusive KPIs: 6 convites únicos, origens e agendamentos vincula
   assert.equal(kpis.emailCount, 1);
   assert.equal(kpis.jornada30Count, 3);
   assert.equal(kpis.jornada50Count, 3);
-  assert.equal(kpis.totalAgendamentosVinculados, 12);
+  assert.equal(kpis.totalAgendamentosVinculados, 17);
 });
 
-test('NPS Kanban grouping: columns organized by hours with current hour first', () => {
-  const allEvaluated = filterAndSortRecords(
+test('Kanban Current Hour rule: only the real current hour has isCurrentHour=true, never transferred when filtered out', () => {
+  const allEvaluated = evaluateAllStudentsAttendance(
     INITIAL_STUDENT_RECORDS,
-    defaultCriteria,
     parseTimeToMinutes('14:05')
   );
 
-  const allNpsRecords = filterNpsRecords(allEvaluated, {
-    search: '',
-    origem: 'TODAS',
-    pontoJornada: 'TODOS',
-    horario: 'TODOS',
-    diaSemana: 'TODOS',
-  });
+  const colsAt14 = groupByHourKanban(
+    allEvaluated,
+    'AGENDADO',
+    parseTimeToMinutes('14:05')
+  );
+  assert.equal(colsAt14[0].hourKey, '14h');
+  assert.equal(colsAt14[0].isCurrentHour, true);
 
-  const npsCols = groupByNpsHourKanban(allNpsRecords, parseTimeToMinutes('14:05'));
-  assert.ok(npsCols.length > 0);
-
-  // First column is 14h because Roseane and Izaque have class at 14h!
-  assert.equal(npsCols[0].hourKey, '14h');
-  assert.equal(npsCols[0].isCurrentHour, true);
-
-  // Total agendamentos across all NPS columns equals 12
-  const totalInCols = npsCols.reduce((acc, c) => acc + c.totalAgendamentos, 0);
-  assert.equal(totalInCols, 12);
+  // Filter to only 16h while current time is still 14:05 -> 16h must NOT become isCurrentHour
+  const only16h = filterAndSortRecords(
+    allEvaluated,
+    { ...defaultCriteria, horario: '16h' },
+    parseTimeToMinutes('14:05')
+  );
+  const colsFiltered = groupByHourKanban(
+    only16h,
+    'AGENDADO',
+    parseTimeToMinutes('14:05')
+  );
+  assert.equal(colsFiltered.length, 1);
+  assert.equal(colsFiltered[0].hourKey, '16h');
+  assert.equal(colsFiltered[0].isCurrentHour, false);
 });
 
 test('generateCsvContent and generateWhatsAppSummary format exports properly', () => {
@@ -258,14 +258,22 @@ test('generateCsvContent and generateWhatsAppSummary format exports properly', (
   const csv = generateCsvContent(
     sample,
     ['contrato', 'nomeCompleto', 'curso', 'attendanceStatus', 'nota', 'observacao'],
-    { '5108237': 'Contato realizado via WhatsApp' },
+    { [sample[0].contrato]: 'Excelente participação' },
     ';',
-    parseTimeToMinutes('14:05')
+    parseTimeToMinutes('20:30')
   );
-  assert.ok(csv.includes('5108237;Leonice Conceição Prado'));
 
-  const wa = generateWhatsAppSummary(INITIAL_STUDENT_RECORDS, 'ESCOLA PRESIDENTE PRUDENTE', '30/10/2026', parseTimeToMinutes('14:05'));
-  assert.ok(wa.includes('ESCOLA PRESIDENTE PRUDENTE'));
-  assert.ok(wa.includes('Presença confirmada: 20'));
-  assert.ok(wa.includes('Falta (após 15 min de tolerância): 9'));
+  const lines = csv.split('\r\n');
+  assert.equal(lines.length, 4);
+  assert.ok(lines[0].includes('Contrato / Matrícula'));
+  assert.ok(lines[1].includes('Excelente participação'));
+
+  const summary = generateWhatsAppSummary(
+    INITIAL_STUDENT_RECORDS,
+    'ESCOLA PRESIDENTE PRUDENTE',
+    '30/10/2026',
+    parseTimeToMinutes('20:30')
+  );
+  assert.ok(summary.includes('RELATÓRIO DE DESEMPENHO ACADÊMICO'));
+  assert.ok(summary.includes('Total de agendamentos: 114'));
 });

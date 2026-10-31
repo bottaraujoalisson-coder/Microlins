@@ -28,6 +28,7 @@ import {
 import {
   computeNpsSummaryKPIs,
   computePerformanceKPIs,
+  evaluateAllStudentsAttendance,
   extractRecordStartHour,
   filterAndSortRecords,
   filterNpsRecords,
@@ -44,21 +45,30 @@ import { NpsHourKanbanBoard } from './components/NpsHourKanbanBoard';
 const AUTO_SYNC_INTERVAL_MS = 60_000;
 
 /**
- * Retorna o horário de referência correspondente à extração dos dados do Portal do Aluno.
- * A extração oficial ocorreu às 13:59:38, iniciando o bloco das 14h (14:00 às 14:15 de tolerância).
+ * Retorna os minutos atuais no fuso horário de Brasília (America/Sao_Paulo).
  */
-function getPortalReferenceMinutes(horaExtracao = PORTAL_METADATA.horaExtracao): number {
-  try {
-    const [hStr = '14', mStr = '00'] = (horaExtracao || '14:00').split(':');
+function getBrasiliaCurrentMinutes(timeStrOverride?: string): number {
+  if (timeStrOverride) {
+    const [hStr = '0', mStr = '0'] = timeStrOverride.split(':');
     const h = parseInt(hStr, 10);
     const m = parseInt(mStr, 10);
-    // 13:59:38 pertence ao bloco de início das aulas das 14h (14:05)
-    if (h === 13 && m >= 45) {
-      return 14 * 60 + 5;
+    if (!Number.isNaN(h) && !Number.isNaN(m)) {
+      return h * 60 + m;
     }
-    return (Number.isNaN(h) ? 14 : h) * 60 + (Number.isNaN(m) ? 5 : m);
+  }
+  try {
+    const parts = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(new Date());
+    const h = parseInt(parts.find((p) => p.type === 'hour')?.value || '14', 10);
+    const m = parseInt(parts.find((p) => p.type === 'minute')?.value || '0', 10);
+    return (Number.isNaN(h) ? 14 : h) * 60 + (Number.isNaN(m) ? 0 : m);
   } catch {
-    return 14 * 60 + 5;
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
   }
 }
 
@@ -88,10 +98,11 @@ export default function App() {
   const [activeNpsInvitations, setActiveNpsInvitations] = useState<
     ActiveNpsInvitation[]
   >(INITIAL_ACTIVE_NPS_INVITATIONS);
+  const [portalMeta, setPortalMeta] = useState(PORTAL_METADATA);
 
-  // Horário de referência oficial da agenda do portal (bloco das 14h)
+  // Horário atual real de Brasília (em minutos desde 00:00)
   const [currentTimeMinutes, setCurrentTimeMinutes] = useState<number>(() =>
-    getPortalReferenceMinutes()
+    getBrasiliaCurrentMinutes()
   );
 
   // Momento real da última sincronização com sucesso
@@ -116,7 +127,7 @@ export default function App() {
   // === Filtros exclusivos da aba KANBAN NPS (Origem, Ponto da Jornada, Horário e Pesquisa) ===
   const [npsOrigem, setNpsOrigem] = useState<'TODAS' | NpsOrigemType>('TODAS');
   const [npsPontoJornada, setNpsPontoJornada] = useState<
-    'TODOS' | '30 dias' | '50 dias'
+    'TODOS' | '30 dias' | '50 dias' | '70 dias' | '50+ dias'
   >('TODOS');
   const [npsHorario, setNpsHorario] = useState<string>('TODOS');
   const [npsSearchQuery, setNpsSearchQuery] = useState<string>('');
@@ -139,8 +150,13 @@ export default function App() {
         ) {
           setActiveNpsInvitations(payload.activeNpsInvitations);
         }
-        if (payload.metadata?.horaExtracao) {
-          setCurrentTimeMinutes(getPortalReferenceMinutes(payload.metadata.horaExtracao));
+        if (payload.metadata) {
+          setPortalMeta((prev) => ({ ...prev, ...payload.metadata }));
+        }
+        if (payload.syncedAt) {
+          setCurrentTimeMinutes(getBrasiliaCurrentMinutes(payload.syncedAt));
+        } else {
+          setCurrentTimeMinutes(getBrasiliaCurrentMinutes());
         }
         if (payload.syncedFormatted) {
           setLastSyncTimestamp(payload.syncedFormatted);
@@ -149,9 +165,11 @@ export default function App() {
           setLastSyncTimestamp(`${datePart} às ${payload.syncedAt}`);
         }
       } else {
+        setCurrentTimeMinutes(getBrasiliaCurrentMinutes());
         setLastSyncTimestamp(formatCurrentBrasiliaSyncTimestamp());
       }
     } catch {
+      setCurrentTimeMinutes(getBrasiliaCurrentMinutes());
       setLastSyncTimestamp(formatCurrentBrasiliaSyncTimestamp());
     }
   }, []);
@@ -162,39 +180,52 @@ export default function App() {
     return () => clearInterval(timer);
   }, [syncPortalData]);
 
+  // 1. Avaliação global de todos os agendamentos na agenda completa do dia
+  // Garante que Evasão (1 presença + faltas nos demais horários do dia) e vínculo NPS sejam sempre avaliados sobre todos os horários do aluno antes de aplicar qualquer filtro.
+  const allEvaluatedRecords = useMemo(
+    () =>
+      evaluateAllStudentsAttendance(
+        records,
+        currentTimeMinutes,
+        {},
+        activeNpsInvitations
+      ),
+    [records, currentTimeMinutes, activeNpsInvitations]
+  );
+
   // Opções dinâmicas para filtros do Kanban de Alunos
   const salaOptions = useMemo(() => {
     const set = new Set<string>();
-    for (const r of records) {
+    for (const r of allEvaluatedRecords) {
       if (r.sala) set.add(r.sala);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
-  }, [records]);
+  }, [allEvaluatedRecords]);
 
   const horarioOptions = useMemo(() => {
     const hourNumbers = new Set<number>();
-    for (const r of records) {
+    for (const r of allEvaluatedRecords) {
       const h = extractRecordStartHour(r, 'AGENDADO');
       if (h !== null) hourNumbers.add(h);
     }
     return Array.from(hourNumbers)
       .sort((a, b) => a - b)
       .map((h) => `${String(h).padStart(2, '0')}h`);
-  }, [records]);
+  }, [allEvaluatedRecords]);
 
   const modalidadeOptions = useMemo(() => {
     const set = new Set<ModalityType>();
-    for (const r of records) {
+    for (const r of allEvaluatedRecords) {
       if (r.modalidade) set.add(r.modalidade);
     }
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
-  }, [records]);
+  }, [allEvaluatedRecords]);
 
-  // Registros avaliados do Kanban de Alunos com filtros de cabeçalho
+  // Registros avaliados do Kanban de Alunos com filtros de cabeçalho (Sala, Horário, Modalidade, Pesquisa)
   const headerFilteredRecords = useMemo(
     () =>
       filterAndSortRecords(
-        records,
+        allEvaluatedRecords,
         {
           search: searchQuery,
           sala: selectedSala,
@@ -214,7 +245,7 @@ export default function App() {
         activeNpsInvitations
       ),
     [
-      records,
+      allEvaluatedRecords,
       searchQuery,
       selectedSala,
       selectedHorario,
@@ -260,32 +291,18 @@ export default function App() {
     [activeStudentRecords, currentTimeMinutes, activeNpsInvitations]
   );
 
-  // Todos os registros avaliados (usados para o Modal de Detalhes do Aluno)
-  const allEvaluatedRecords = useMemo(
-    () =>
-      filterAndSortRecords(
-        records,
-        {
-          search: '',
-          status: 'TODOS',
-          attendanceFilter: 'TODOS',
-          modalidade: 'TODAS',
-          turno: 'TODOS',
-          curso: 'TODOS',
-          horario: 'TODOS',
-          notaFilter: 'TODOS',
-          apenasInadimplentes: false,
-          sortBy: 'horario',
-          sortDir: 'asc',
-        },
-        currentTimeMinutes,
-        {},
-        activeNpsInvitations
-      ),
-    [records, currentTimeMinutes, activeNpsInvitations]
-  );
-
   // === DADOS E FILTROS EXCLUSIVOS DA ABA KANBAN NPS ===
+  // Quantidade total de convites NPS ativos vinculados no Kanban (para o badge da aba)
+  const totalLinkedNpsInvitationsCount = useMemo(() => {
+    const contracts = new Set<string>();
+    for (const r of allEvaluatedRecords) {
+      if (r.hasActiveNps && r.npsInvitation) {
+        contracts.add(r.contrato);
+      }
+    }
+    return contracts.size;
+  }, [allEvaluatedRecords]);
+
   // Opções de horários existentes nos dados vinculados de NPS
   const npsHorarioOptions = useMemo(() => {
     const hours = new Set<number>();
@@ -371,6 +388,9 @@ export default function App() {
             >
               <Kanban className="h-3.5 w-3.5 text-sky-600" />
               <span>Kanban de Alunos</span>
+              <span className="ml-1 rounded-full bg-sky-100 px-1.5 py-0.2 text-[10px] font-bold text-sky-800 tabular-nums">
+                {allEvaluatedRecords.length}
+              </span>
             </button>
 
             <button
@@ -385,8 +405,8 @@ export default function App() {
             >
               <Sparkles className="h-3.5 w-3.5 text-amber-600" />
               <span>Kanban NPS</span>
-              <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.2 text-[10px] font-bold text-amber-800">
-                {activeNpsInvitations.length}
+              <span className="ml-1 rounded-full bg-amber-100 px-1.5 py-0.2 text-[10px] font-bold text-amber-800 tabular-nums">
+                {totalLinkedNpsInvitationsCount}
               </span>
             </button>
           </nav>
@@ -395,7 +415,7 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <span className="font-display inline-flex items-center gap-1.5 font-bold text-slate-900">
               <Building2 className="h-3.5 w-3.5 text-sky-600" />
-              {PORTAL_METADATA.unidade}
+              {portalMeta.unidade}
             </span>
             <span className="text-slate-300" aria-hidden="true">
               ·
@@ -403,13 +423,13 @@ export default function App() {
             <span className="inline-flex items-center gap-1.5 font-medium text-slate-700">
               <UserCheck className="h-3.5 w-3.5 text-sky-600" />
               <span className="font-bold text-slate-900">
-                {PORTAL_METADATA.usuarioNomeCompleto}
+                {portalMeta.usuarioNomeCompleto}
               </span>
               <span className="text-slate-400" aria-hidden="true">
                 ·
               </span>
               <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-600">
-                {PORTAL_METADATA.usuarioCargo} ({PORTAL_METADATA.usuarioLogin})
+                {portalMeta.usuarioCargo} ({portalMeta.usuarioLogin})
               </span>
             </span>
           </div>
@@ -549,7 +569,7 @@ export default function App() {
               </select>
             </div>
 
-            {/* Ponto da Jornada (Todos, 30 dias, 50 dias) */}
+            {/* Ponto da Jornada (Todos, 30 dias, 50 dias, 70 dias, 50+ dias) */}
             <div className="sm:col-span-3">
               <label htmlFor="filter-nps-jornada" className="sr-only">
                 Ponto da Jornada NPS
@@ -560,7 +580,12 @@ export default function App() {
                 value={npsPontoJornada}
                 onChange={(e) =>
                   setNpsPontoJornada(
-                    e.target.value as 'TODOS' | '30 dias' | '50 dias'
+                    e.target.value as
+                      | 'TODOS'
+                      | '30 dias'
+                      | '50 dias'
+                      | '70 dias'
+                      | '50+ dias'
                   )
                 }
                 className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-800 focus:border-amber-500 focus:outline-none"
@@ -568,6 +593,8 @@ export default function App() {
                 <option value="TODOS">Jornada: Todas</option>
                 <option value="30 dias">30 dias</option>
                 <option value="50 dias">50 dias</option>
+                <option value="70 dias">70 dias</option>
+                <option value="50+ dias">50 e 70 dias (50+)</option>
               </select>
             </div>
 
@@ -772,7 +799,14 @@ export default function App() {
           /* 6 Cards de Resumo Exclusivos da aba NPS (mesmo padrão e altura de 40px) */
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
             {/* 1. Convites Ativos */}
-            <div className="flex h-10 items-center justify-between rounded-lg border border-amber-300 bg-amber-50/70 px-3">
+            <button
+              type="button"
+              onClick={() => {
+                setNpsOrigem('TODAS');
+                setNpsPontoJornada('TODOS');
+              }}
+              className="flex h-10 items-center justify-between rounded-lg border border-amber-300 bg-amber-50/70 px-3 text-left transition-colors hover:bg-amber-50"
+            >
               <div className="flex min-w-0 items-center gap-1.5">
                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-amber-600" />
                 <span className="truncate text-xs font-semibold text-amber-900 whitespace-nowrap">
@@ -782,10 +816,23 @@ export default function App() {
               <span className="font-display ml-2 text-sm font-bold text-amber-900 tabular-nums sm:text-base">
                 {npsKPIs.totalConvitesAtivos}
               </span>
-            </div>
+            </button>
 
             {/* 2. Portal do Aluno */}
-            <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200/90 bg-white px-3">
+            <button
+              type="button"
+              onClick={() =>
+                setNpsOrigem((prev) =>
+                  prev === 'Portal do Aluno' ? 'TODAS' : 'Portal do Aluno'
+                )
+              }
+              aria-pressed={npsOrigem === 'Portal do Aluno'}
+              className={`flex h-10 items-center justify-between rounded-lg border px-3 text-left transition-colors ${
+                npsOrigem === 'Portal do Aluno'
+                  ? 'border-sky-400 bg-sky-50/80 ring-1 ring-sky-400/25'
+                  : 'border-slate-200/90 bg-white hover:border-sky-200 hover:bg-sky-50/35'
+              }`}
+            >
               <div className="flex min-w-0 items-center gap-1.5">
                 <Globe className="h-3.5 w-3.5 shrink-0 text-sky-600" />
                 <span className="truncate text-xs font-semibold text-slate-700 whitespace-nowrap">
@@ -795,10 +842,21 @@ export default function App() {
               <span className="font-display ml-2 text-sm font-bold text-sky-700 tabular-nums sm:text-base">
                 {npsKPIs.portalDoAlunoCount}
               </span>
-            </div>
+            </button>
 
             {/* 3. E-mail */}
-            <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200/90 bg-white px-3">
+            <button
+              type="button"
+              onClick={() =>
+                setNpsOrigem((prev) => (prev === 'E-mail' ? 'TODAS' : 'E-mail'))
+              }
+              aria-pressed={npsOrigem === 'E-mail'}
+              className={`flex h-10 items-center justify-between rounded-lg border px-3 text-left transition-colors ${
+                npsOrigem === 'E-mail'
+                  ? 'border-indigo-400 bg-indigo-50/80 ring-1 ring-indigo-400/25'
+                  : 'border-slate-200/90 bg-white hover:border-indigo-200 hover:bg-indigo-50/35'
+              }`}
+            >
               <div className="flex min-w-0 items-center gap-1.5">
                 <Mail className="h-3.5 w-3.5 shrink-0 text-indigo-600" />
                 <span className="truncate text-xs font-semibold text-slate-700 whitespace-nowrap">
@@ -808,10 +866,23 @@ export default function App() {
               <span className="font-display ml-2 text-sm font-bold text-indigo-700 tabular-nums sm:text-base">
                 {npsKPIs.emailCount}
               </span>
-            </div>
+            </button>
 
             {/* 4. Jornada 30 dias */}
-            <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200/90 bg-white px-3">
+            <button
+              type="button"
+              onClick={() =>
+                setNpsPontoJornada((prev) =>
+                  prev === '30 dias' ? 'TODOS' : '30 dias'
+                )
+              }
+              aria-pressed={npsPontoJornada === '30 dias'}
+              className={`flex h-10 items-center justify-between rounded-lg border px-3 text-left transition-colors ${
+                npsPontoJornada === '30 dias'
+                  ? 'border-amber-400 bg-amber-50/80 ring-1 ring-amber-400/25'
+                  : 'border-slate-200/90 bg-white hover:border-amber-200 hover:bg-amber-50/35'
+              }`}
+            >
               <div className="flex min-w-0 items-center gap-1.5">
                 <Clock className="h-3.5 w-3.5 shrink-0 text-amber-600" />
                 <span className="truncate text-xs font-semibold text-slate-700 whitespace-nowrap">
@@ -821,20 +892,33 @@ export default function App() {
               <span className="font-display ml-2 text-sm font-bold text-amber-800 tabular-nums sm:text-base">
                 {npsKPIs.jornada30Count}
               </span>
-            </div>
+            </button>
 
-            {/* 5. Jornada 50 dias */}
-            <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200/90 bg-white px-3">
+            {/* 5. Jornada 50+ dias */}
+            <button
+              type="button"
+              onClick={() =>
+                setNpsPontoJornada((prev) =>
+                  prev === '50+ dias' ? 'TODOS' : '50+ dias'
+                )
+              }
+              aria-pressed={npsPontoJornada === '50+ dias'}
+              className={`flex h-10 items-center justify-between rounded-lg border px-3 text-left transition-colors ${
+                npsPontoJornada === '50+ dias'
+                  ? 'border-emerald-400 bg-emerald-50/80 ring-1 ring-emerald-400/25'
+                  : 'border-slate-200/90 bg-white hover:border-emerald-200 hover:bg-emerald-50/35'
+              }`}
+            >
               <div className="flex min-w-0 items-center gap-1.5">
                 <CalendarCheck className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
                 <span className="truncate text-xs font-semibold text-slate-700 whitespace-nowrap">
-                  Jornada 50 dias
+                  Jornada 50+ dias
                 </span>
               </div>
               <span className="font-display ml-2 text-sm font-bold text-emerald-800 tabular-nums sm:text-base">
                 {npsKPIs.jornada50Count}
               </span>
-            </div>
+            </button>
 
             {/* 6. Agendamentos vinculados */}
             <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200/90 bg-white px-3">

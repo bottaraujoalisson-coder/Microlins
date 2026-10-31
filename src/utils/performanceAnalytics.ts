@@ -300,6 +300,9 @@ export function resolveRecordProfessor(record: StudentPerformanceRecord): string
 const CONTRACTS_WITHOUT_APOSTILA = new Set(['5012361', '4782770', '5104218', '5089112']);
 
 export function resolvePossuiApostila(record: StudentPerformanceRecord): boolean {
+  if (typeof record.possuiApostila === 'boolean') {
+    return record.possuiApostila;
+  }
   if (record.contrato in PORTAL_APOSTILA_BY_CONTRATO) {
     return PORTAL_APOSTILA_BY_CONTRATO[record.contrato];
   }
@@ -371,11 +374,11 @@ export function evaluateStudentAttendance(
   activeNpsInvitations: ActiveNpsInvitation[] = INITIAL_ACTIVE_NPS_INVITATIONS
 ): EvaluatedStudentRecord {
   const startHour = extractRecordStartHour(record, 'AGENDADO') ?? 8;
-  const scheduledStartMinutes = startHour * 60;
+  const scheduledStartMinutes = parseTimeToMinutes(record.horaInicio || `${String(startHour).padStart(2, '0')}:00`);
   const toleranceEndMinutes = scheduledStartMinutes + 15;
   const paddedHour = String(startHour).padStart(2, '0');
   const hourKey = `${paddedHour}h`;
-  const toleranceWindowLabel = `${paddedHour}:00 às ${paddedHour}:15`;
+  const toleranceWindowLabel = `${formatMinutesToHHMM(scheduledStartMinutes)} às ${formatMinutesToHHMM(toleranceEndMinutes)}`;
 
   const isWithinTolerance =
     currentTimeMinutes >= scheduledStartMinutes && currentTimeMinutes < toleranceEndMinutes;
@@ -387,7 +390,8 @@ export function evaluateStudentAttendance(
   const hasPortalPresence =
     record.status === 'FINALIZADO' ||
     record.status === 'INICIADO' ||
-    Boolean(record.inicio && record.inicio.trim() !== '');
+    Boolean(record.inicio && record.inicio.trim() !== '') ||
+    Boolean(record.fim && record.fim.trim() !== '');
 
   let attendanceStatus: AttendanceStatus;
 
@@ -409,6 +413,7 @@ export function evaluateStudentAttendance(
     (attendanceStatus === 'Presença' ? `${paddedHour}:05` : '');
 
   const linkAcessoDireto =
+    record.linkLoginUrl ||
     PORTAL_AUTH_LINKS_BY_CONTRATO[record.contrato] ||
     `https://portaldoaluno.microlins.com.br/autenticacao/tokenAluno/${record.contrato}`;
   const cleanAlunoPhone = (record.telefoneAluno || '').replace(/\D/g, '');
@@ -535,9 +540,9 @@ export function evaluateAllStudentsAttendance(
     if (seenIds.has(r.id)) continue;
     seenIds.add(r.id);
     const maybeEvaluated = r as Partial<EvaluatedStudentRecord>;
-    if (typeof maybeEvaluated.isEvasao === 'boolean' && maybeEvaluated.isEvasao) {
+    if (typeof maybeEvaluated.isEvasao === 'boolean') {
       preservedEvasaoById.set(r.id, {
-        isEvasao: true,
+        isEvasao: maybeEvaluated.isEvasao,
         evasaoSummary: maybeEvaluated.evasaoSummary ?? null,
       });
     }
@@ -554,6 +559,7 @@ export function evaluateAllStudentsAttendance(
   // Agrupar por (diaSemana, contrato) para avaliar a regra de evasão do aluno no dia
   const dayContractGroups = new Map<string, EvaluatedStudentRecord[]>();
   for (const rec of uniqueSchedules) {
+    if (preservedEvasaoById.has(rec.id)) continue;
     const key = `${rec.diaSemana}::${rec.contrato}`;
     const list = dayContractGroups.get(key) ?? [];
     list.push(rec);
@@ -570,14 +576,12 @@ export function evaluateAllStudentsAttendance(
     }
   }
 
-  // Preservar estado de evasão caso o agendamento já tenha sido avaliado na agenda completa do dia antes de um filtro de horário/status
+  // Preservar estado de evasão caso o agendamento já tenha sido avaliado na agenda completa do dia antes de um filtro de horário/sala/status
   for (const rec of uniqueSchedules) {
     const preserved = preservedEvasaoById.get(rec.id);
-    if (preserved && preserved.isEvasao) {
-      rec.isEvasao = true;
-      if (!rec.evasaoSummary) {
-        rec.evasaoSummary = preserved.evasaoSummary;
-      }
+    if (preserved !== undefined) {
+      rec.isEvasao = preserved.isEvasao;
+      rec.evasaoSummary = preserved.evasaoSummary;
     }
   }
 
@@ -1128,7 +1132,7 @@ export function computeNpsSummaryKPIs(
 
   const jornada50Count = uniqueList.filter((r) => {
     const p = (r.npsInvitation?.pontoJornada || '').toLowerCase();
-    return p.includes('50');
+    return p.includes('50') || p.includes('70') || (!p.includes('30') && p.length > 0);
   }).length;
 
   const totalAgendamentosVinculados = npsEvaluatedRecords.length;
@@ -1146,7 +1150,7 @@ export function computeNpsSummaryKPIs(
 export interface NpsFilterCriteria {
   search: string;
   origem: 'TODAS' | NpsOrigemType;
-  pontoJornada: 'TODOS' | '30 dias' | '50 dias';
+  pontoJornada: 'TODOS' | '30 dias' | '50 dias' | '70 dias' | '50+ dias';
   horario: string;
   diaSemana: string;
 }
@@ -1170,9 +1174,15 @@ export function filterNpsRecords(
     }
     if (pontoFilter !== 'TODOS') {
       const p = (r.npsInvitation?.pontoJornada || '').toLowerCase();
-      const targetDays = pontoFilter.replace(' dias', '');
-      if (!p.includes(targetDays)) {
-        return false;
+      if (pontoFilter === '50+ dias') {
+        if (!p.includes('50') && !p.includes('70')) {
+          return false;
+        }
+      } else {
+        const targetDays = pontoFilter.replace(' dias', '');
+        if (!p.includes(targetDays)) {
+          return false;
+        }
       }
     }
     if (
@@ -1265,9 +1275,10 @@ export function groupByNpsHourKanban(
     const jornada30Count = list.filter((r) =>
       (r.npsInvitation?.pontoJornada || '').includes('30')
     ).length;
-    const jornada50Count = list.filter((r) =>
-      (r.npsInvitation?.pontoJornada || '').includes('50')
-    ).length;
+    const jornada50Count = list.filter((r) => {
+      const p = r.npsInvitation?.pontoJornada || '';
+      return p.includes('50') || p.includes('70');
+    }).length;
 
     columns.push({
       hourKey,
