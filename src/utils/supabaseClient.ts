@@ -1,7 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
 import {
-  ALL_WEEK_STUDENT_RECORDS,
-  INITIAL_ACTIVE_NPS_INVITATIONS,
   StudentPerformanceRecord,
   ActiveNpsInvitation,
 } from '../data/microlinsData';
@@ -19,129 +17,117 @@ export const supabase = createClient(supabaseUrl, supabasePublishableKey, {
 });
 
 /**
- * Busca assíncrona de registros de alunos no Supabase, com fallback para o mock local se a tabela estiver vazia ou offline.
+ * Busca estrita e exclusiva de registros de alunos no Supabase (sem fallbacks locais).
  */
 export async function fetchStudentRecords(): Promise<StudentPerformanceRecord[]> {
-  try {
-    const { data, error } = await supabase.from('student_records').select('*');
-    if (error || !data || data.length === 0) {
-      return ALL_WEEK_STUDENT_RECORDS;
-    }
-    return data.map((r: any) => ({
-      id: r.id,
-      contrato: r.contrato,
-      aulaId: r.aula_id || r.aulaId,
-      nomeCompleto: r.nome_completo || r.nomeCompleto,
-      nomeCurto: r.nome_curto || r.nomeCurto,
-      telefoneAluno: r.telefone_aluno || r.telefoneAluno,
-      whatsappAlunoUrl: r.whatsapp_aluno_url || r.whatsappAlunoUrl,
-      nomeResponsavel: r.nome_responsavel || r.nomeResponsavel,
-      telefoneResponsavel: r.telefone_responsavel || r.telefoneResponsavel,
-      whatsappResponsavelUrl: r.whatsapp_responsavel_url || r.whatsappResponsavelUrl,
-      formacao: r.formacao,
-      curso: r.curso,
-      aulaInfo: r.aula_info || r.aulaInfo,
-      aulaNumero: r.aula_numero ?? r.aulaNumero,
-      tipoMaterial: r.tipo_material || r.tipoMaterial,
-      possuiApostila: r.possui_apostila ?? r.possuiApostila,
-      horario: r.horario,
-      horaInicio: r.hora_inicio || r.horaInicio,
-      horaFim: r.hora_fim || r.horaFim,
-      turno: r.turno,
-      sala: r.sala,
-      modalidade: r.modalidade,
-      inicio: r.inicio,
-      fim: r.fim,
-      nota: r.nota,
-      notaId: r.nota_id || r.notaId,
-      infoAula: r.info_aula || r.infoAula,
-      status: r.status,
-      presencaOuFalta: r.presenca_ou_falta || r.presencaOuFalta,
-      statusSistema: r.status_sistema || r.statusSistema,
-      inadimplente: r.inadimplente,
-      parcelasAtrasadas: r.parcelas_atrasadas ?? r.parcelasAtrasadas,
-      notaAulaNumero: r.nota_aula_numero ?? r.notaAulaNumero,
-      diaSemana: r.dia_semana || r.diaSemana,
-      semanaCode: r.semana_code || r.semanaCode,
-      email: r.email,
-      linkLoginUrl: r.link_login_url || r.linkLoginUrl,
-      cadId: r.cad_id || r.cadId,
-      cadNome: r.cad_nome || r.cadNome,
-      unidade: r.unidade,
-      municipio: r.municipio,
-      educador: r.educador,
-      educadorCachedAt: r.educador_cached_at || r.educadorCachedAt,
-    })) as StudentPerformanceRecord[];
-  } catch (err) {
-    return ALL_WEEK_STUDENT_RECORDS;
+  const { data, error } = await supabase.from('student_records').select('*');
+  if (error || !data) {
+    throw new Error(error?.message || 'Falha ao buscar registros de alunos no Supabase.');
   }
+  return data.map((r: any) => ({
+    id: r.id,
+    contrato: r.contrato,
+    aulaId: r.aula_id || r.aulaId,
+    nomeCompleto: r.nome_completo || r.nomeCompleto,
+    nomeCurto: r.nome_curto || r.nomeCurto,
+    telefoneAluno: r.telefone_aluno || r.telefoneAluno,
+    whatsappAlunoUrl: r.whatsapp_aluno_url || r.whatsappAlunoUrl,
+    nomeResponsavel: r.nome_responsavel || r.nomeResponsavel,
+    telefoneResponsavel: r.telefone_responsavel || r.telefoneResponsavel,
+    whatsappResponsavelUrl: r.whatsapp_responsavel_url || r.whatsappResponsavelUrl,
+    formacao: r.formacao,
+    curso: r.curso,
+    aulaInfo: r.aula_info || r.aulaInfo,
+    aulaNumero: r.aula_numero ?? r.aulaNumero,
+    tipoMaterial: r.tipo_material || r.tipoMaterial,
+    possuiApostila: r.possui_apostila ?? r.possuiApostila,
+    horario: r.horario,
+    horaInicio: r.hora_inicio || r.horaInicio,
+    horaFim: r.hora_fim || r.horaFim,
+    turno: r.turno,
+    sala: r.sala,
+    modalidade: r.modalidade,
+    inicio: r.inicio,
+    fim: r.fim,
+    nota: r.nota,
+    notaId: r.nota_id || r.notaId,
+    infoAula: r.info_aula || r.infoAula,
+    status: r.status,
+    presencaOuFalta: r.presenca_ou_falta || r.presencaOuFalta,
+    statusSistema: r.status_sistema || r.statusSistema,
+    inadimplente: r.inadimplente,
+    parcelasAtrasadas: r.parcelas_atrasadas ?? r.parcelasAtrasadas,
+    notaAulaNumero: r.nota_aula_numero ?? r.notaAulaNumero,
+    diaSemana: r.dia_semana || r.diaSemana,
+    semanaCode: r.semana_code || r.semanaCode,
+    email: r.email,
+    linkLoginUrl: r.link_login_url || r.linkLoginUrl,
+    cadId: r.cad_id || r.cadId,
+    cadNome: r.cad_nome || r.cadNome,
+    unidade: r.unidade,
+    municipio: r.municipio,
+    educador: r.educador,
+    educadorCachedAt: r.educador_cached_at || r.educadorCachedAt,
+  })) as StudentPerformanceRecord[];
 }
 
 /**
- * Busca assíncrona de convites NPS no Supabase, com fallback para o mock local.
+ * Busca estrita e exclusiva de convites NPS no Supabase.
  */
 export async function fetchNpsInvitations(): Promise<ActiveNpsInvitation[]> {
-  try {
-    const { data, error } = await supabase.from('nps_records').select('*');
-    if (error || !data || data.length === 0) {
-      return INITIAL_ACTIVE_NPS_INVITATIONS;
-    }
-    return data.map((inv: any) => ({
-      id: inv.id,
-      controlId: inv.control_id || inv.controlId,
-      studentName: inv.student_name || inv.studentName,
-      contrato: inv.contrato,
-      codigoPessoa: inv.codigo_pessoa || inv.codigoPessoa,
-      email: inv.email,
-      phone: inv.phone,
-      actionName: inv.action_name || inv.actionName,
-      pontoJornada: inv.ponto_jornada || inv.pontoJornada,
-      origem: inv.origem,
-      channel: inv.channel,
-      invitationStatus: inv.invitation_status || inv.invitationStatus,
-      answered: inv.answered,
-      createdAt: inv.created_at || inv.createdAt,
-      sentAt: inv.sent_at || inv.sentAt,
-      answeredAt: inv.answered_at || inv.answeredAt,
-      attemptsCount: inv.attempts_count ?? inv.attemptsCount,
-      surveyUrl: inv.survey_url || inv.surveyUrl,
-    })) as ActiveNpsInvitation[];
-  } catch (err) {
-    return INITIAL_ACTIVE_NPS_INVITATIONS;
+  const { data, error } = await supabase.from('nps_records').select('*');
+  if (error || !data) {
+    throw new Error(error?.message || 'Falha ao buscar convites NPS no Supabase.');
   }
+  return data.map((inv: any) => ({
+    id: inv.id,
+    controlId: inv.control_id || inv.controlId,
+    studentName: inv.student_name || inv.studentName,
+    contrato: inv.contrato,
+    codigoPessoa: inv.codigo_pessoa || inv.codigoPessoa,
+    email: inv.email,
+    phone: inv.phone,
+    actionName: inv.action_name || inv.actionName,
+    pontoJornada: inv.ponto_jornada || inv.pontoJornada,
+    origem: inv.origem,
+    channel: inv.channel,
+    invitationStatus: inv.invitation_status || inv.invitationStatus,
+    answered: inv.answered,
+    createdAt: inv.created_at || inv.createdAt,
+    sentAt: inv.sent_at || inv.sentAt,
+    answeredAt: inv.answered_at || inv.answeredAt,
+    attemptsCount: inv.attempts_count ?? inv.attemptsCount,
+    surveyUrl: inv.survey_url || inv.surveyUrl,
+  })) as ActiveNpsInvitation[];
 }
 
 /**
- * Busca assíncrona de escolas cadastradas no Supabase.
+ * Busca estrita e exclusiva de escolas cadastradas no Supabase.
  */
 export async function fetchSchoolsFromSupabase(): Promise<RegisteredSchool[]> {
-  try {
-    const { data, error } = await supabase.from('schools').select('*');
-    if (error || !data || data.length === 0) {
-      return createDefaultSchoolsRegistry();
-    }
-    const defaults = createDefaultSchoolsRegistry()[0];
-    return data.map((s: any) => ({
-      id: s.id,
-      nome: s.nome,
-      cidade: s.cidade || '',
-      uf: s.uf || '',
-      codigoPortal: s.codigo_portal || s.codigoPortal || '',
-      ativa: s.ativa ?? true,
-      active: s.ativa ?? true,
-      createdAt: s.created_at || s.createdAt || new Date().toISOString(),
-      updatedAt: s.updated_at || s.updatedAt || undefined,
-      npsCredential: {
-        email: s.nps_email || defaults.npsCredential.email,
-        password: s.nps_password || defaults.npsCredential.password,
-        companyFilter: s.nps_company_filter || defaults.npsCredential.companyFilter,
-        active: true,
-      },
-      users: defaults.users,
-    }));
-  } catch (err) {
-    return createDefaultSchoolsRegistry();
+  const { data, error } = await supabase.from('schools').select('*');
+  if (error || !data) {
+    throw new Error(error?.message || 'Falha ao buscar escolas no Supabase.');
   }
+  const defaults = createDefaultSchoolsRegistry()[0];
+  return data.map((s: any) => ({
+    id: s.id,
+    nome: s.nome,
+    cidade: s.cidade || '',
+    uf: s.uf || '',
+    codigoPortal: s.codigo_portal || s.codigoPortal || '',
+    ativa: s.ativa ?? true,
+    active: s.ativa ?? true,
+    createdAt: s.created_at || s.createdAt || new Date().toISOString(),
+    updatedAt: s.updated_at || s.updatedAt || undefined,
+    npsCredential: {
+      email: s.nps_email || defaults.npsCredential.email,
+      password: s.nps_password || defaults.npsCredential.password,
+      companyFilter: s.nps_company_filter || defaults.npsCredential.companyFilter,
+      active: true,
+    },
+    users: defaults.users,
+  }));
 }
 
 /**
@@ -149,6 +135,8 @@ export async function fetchSchoolsFromSupabase(): Promise<RegisteredSchool[]> {
  */
 export async function migrateAllDataToSupabase(): Promise<{ success: boolean; message: string }> {
   try {
+    const { ALL_WEEK_STUDENT_RECORDS, INITIAL_ACTIVE_NPS_INVITATIONS } = await import('../data/microlinsData');
+    
     // 1. Migrar escolas
     const schools = createDefaultSchoolsRegistry();
     for (const school of schools) {
@@ -255,7 +243,7 @@ export async function migrateAllDataToSupabase(): Promise<{ success: boolean; me
       }
     }
 
-    return { success: true, message: 'Migração completa de todos os dados para o Supabase realizada com sucesso!' };
+    return { success: true, message: 'Migração completa realizada com sucesso!' };
   } catch (err: any) {
     console.error('Migration error details:', err);
     return { success: false, message: `Erro na migração: ${err?.message || err}` };
