@@ -2734,6 +2734,35 @@ async function startServer() {
     }
   });
 
+  // GET /api/supabase/status — Verifica status da conexão com o Supabase
+  app.get('/api/supabase/status', async (_req, res) => {
+    const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
+    const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
+    const configured = Boolean(supabaseUrl && supabaseKey);
+
+    let connectionTest = false;
+    if (configured) {
+      try {
+        const { createClient } = await import('@supabase/supabase-js');
+        const client = createClient(supabaseUrl, supabaseKey);
+        const { error } = await client.from('schools').select('id').limit(1);
+        connectionTest = !error || error.code === 'PGRST116' || error.message.includes('relation');
+      } catch {
+        connectionTest = false;
+      }
+    }
+
+    res.json({
+      ok: true,
+      configured,
+      connected: connectionTest,
+      supabaseUrl: supabaseUrl ? supabaseUrl.replace(/https:\/\/([^.]+).*/, 'https://$1.supabase.co') : null,
+      message: configured 
+        ? (connectionTest ? 'Supabase conectado com sucesso!' : 'Supabase configurado, mas tabela ainda não criada ou sem permissão.')
+        : 'Supabase não configurado. Defina VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.'
+    });
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },

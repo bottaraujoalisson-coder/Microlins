@@ -38,6 +38,7 @@ import {
   PORTAL_WEEKDAY_LABEL_TO_CODE,
   StudentPerformanceRecord,
 } from './data/microlinsData';
+import { fetchStudentRecords, fetchNpsInvitations, fetchSchoolsFromSupabase } from './utils/supabaseClient';
 import {
   ApostilaFilterType,
   buildSynchronizedNpsStudentCards,
@@ -238,6 +239,39 @@ export default function App() {
   );
   const [enteredSchoolFromAdmin, setEnteredSchoolFromAdmin] =
     useState<boolean>(false);
+
+  // Carregamento assíncrono do Supabase (Substituindo mocks estáticos por chamadas de fetch assíncronas)
+  useEffect(() => {
+    let isMounted = true;
+    async function loadSupabaseData() {
+      try {
+        const [remoteRecords, remoteNps, remoteSchools] = await Promise.all([
+          fetchStudentRecords(),
+          fetchNpsInvitations(),
+          fetchSchoolsFromSupabase(),
+        ]);
+        if (isMounted) {
+          if (remoteRecords && remoteRecords.length > 0) {
+            setRecords(remoteRecords);
+          }
+          if (remoteNps && remoteNps.length > 0) {
+            setActiveNpsInvitations(
+              filterAndDeduplicateAnnualNpsInvitations(remoteNps, getCurrentBrasiliaYear())
+            );
+          }
+          if (remoteSchools && remoteSchools.length > 0) {
+            setSchoolsRegistry(remoteSchools);
+          }
+        }
+      } catch (err) {
+        console.error('Error loading data from Supabase:', err);
+      }
+    }
+    loadSupabaseData();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Página dedicada de Privacidade e Proteção de Dados (LGPD — Lei nº 13.709/2018)
   const [showPrivacyPage, setShowPrivacyPage] = useState<boolean>(() => {

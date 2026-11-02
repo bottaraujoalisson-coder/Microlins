@@ -227,9 +227,9 @@ export const NpsInvitationDetailModal: React.FC<NpsInvitationDetailModalProps> =
                   </p>
                   <p className="mt-0.5">
                     O responsável <strong>{studentCard.respondenteNome}</strong> possui{' '}
-                    <strong>{studentCard.alunosVinculadosFamilia.length} filhos elegíveis</strong>{' '}
-                    no ciclo ({studentCard.alunosVinculadosFamilia.join(' e ')} — Contratos #
-                    {studentCard.contratosVinculadosFamilia.join(' / #')}). Os convites foram
+                    <strong>{(studentCard.alunosVinculadosFamilia ?? []).length} filhos elegíveis</strong>{' '}
+                    no ciclo ({(studentCard.alunosVinculadosFamilia ?? []).join(' e ')} — Contratos #
+                    {(studentCard.contratosVinculadosFamilia ?? []).join(' / #')}). Os convites foram
                     consolidados neste único card familiar para evitar mensagens duplicadas e
                     impedir que uma mesma resposta seja contabilizada em duplicidade.
                   </p>

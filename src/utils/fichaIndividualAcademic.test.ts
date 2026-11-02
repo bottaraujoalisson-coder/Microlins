@@ -14,6 +14,8 @@ describe('Ficha Individual do Aluno — Busca e Consolidação Acadêmica', () =
   const evaluated = evaluateAllStudentsAttendance(
     ALL_WEEK_STUDENT_RECORDS,
     10 * 60,
+    {},
+    [],
     'Segunda-feira'
   );
   const directory = buildUniqueStudentDirectory(evaluated);

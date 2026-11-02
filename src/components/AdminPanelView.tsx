@@ -36,6 +36,7 @@ import {
   RegisteredSchool,
   SchoolPortalUser,
 } from '../utils/authRegistry';
+import { migrateAllDataToSupabase } from '../utils/supabaseClient';
 
 interface AuditLogItem {
   id: number;
@@ -162,6 +163,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   const [dbStatus, setDbStatus] = useState<DatabaseStatusInfo | null>(null);
   const [lgpdRequests, setLgpdRequests] = useState<LgpdRequestItem[]>([]);
   const [isCreatingBackup, setIsCreatingBackup] = useState<boolean>(false);
+  const [isMigratingSupabase, setIsMigratingSupabase] = useState<boolean>(false);
 
   // Modais
   const [passwordModalUser, setPasswordModalUser] =
@@ -611,6 +613,35 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         title: 'Falha ao salvar',
         message: 'Não foi possível salvar o usuário no banco de dados.',
       });
+    }
+  };
+
+  const handleRunSupabaseMigration = async () => {
+    setIsMigratingSupabase(true);
+    setFeedbackBanner(null);
+    try {
+      const res = await migrateAllDataToSupabase();
+      if (res.success) {
+        setFeedbackBanner({
+          type: 'success',
+          title: 'Migração para o Supabase Concluída',
+          message: res.message,
+        });
+      } else {
+        setFeedbackBanner({
+          type: 'error',
+          title: 'Erro na Migração',
+          message: res.message,
+        });
+      }
+    } catch (err: any) {
+      setFeedbackBanner({
+        type: 'error',
+        title: 'Falha na Migração',
+        message: err?.message || 'Erro inesperado ao conectar com o Supabase.',
+      });
+    } finally {
+      setIsMigratingSupabase(false);
     }
   };
 
@@ -1860,6 +1891,40 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             data-testid="admin-database-lgpd-section"
             className="space-y-4"
           >
+            {/* Supabase Cloud Migration Card */}
+            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Database className="h-5 w-5 text-purple-600 dark:text-purple-400" />
+                  <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                    Migração Completa para o Supabase (Nuvem)
+                  </h2>
+                </div>
+                <button
+                  type="button"
+                  data-testid="trigger-supabase-migration-btn"
+                  onClick={handleRunSupabaseMigration}
+                  disabled={isMigratingSupabase}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-purple-600 px-3 text-xs font-bold text-white transition-colors hover:bg-purple-700 disabled:opacity-60"
+                >
+                  {isMigratingSupabase ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span>Migrando Dados...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Database className="h-3.5 w-3.5" />
+                      <span>Migrar Tudo para o Supabase</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <p className="mt-2 text-xs text-slate-500">
+                Clique neste botão para transferir todos os registros de alunos, escolas e pesquisas NPS locais para as tabelas do Supabase, tornando o sistema 100% persistente e funcional em nuvem para produção.
+              </p>
+            </div>
+
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
               {/* Diagnóstico do Banco SQLite + Backups (6 cols) */}
               <div className="space-y-4 lg:col-span-6">

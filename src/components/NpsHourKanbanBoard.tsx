@@ -270,12 +270,12 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
                   {card.isVinculoFamiliarAmbiguo && (
                     <div
                       data-testid="nps-card-sibling-badge"
-                      title={`Núcleo familiar com múltiplos filhos elegíveis: ${card.alunosVinculadosFamilia.join(', ')}. Consolidado em card único para evitar abordagem duplicada.`}
+                      title={`Núcleo familiar com múltiplos filhos elegíveis: ${(card.alunosVinculadosFamilia ?? []).join(', ')}. Consolidado em card único para evitar abordagem duplicada.`}
                       className="typo-meta flex items-center gap-1 rounded border border-amber-300/90 bg-amber-50/80 px-2 py-0.5 font-semibold text-amber-900 dark:border-amber-800/70 dark:bg-amber-950/50 dark:text-amber-200"
                     >
                       <Users className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
                       <span className="truncate">
-                        Núcleo Familiar ({card.alunosVinculadosFamilia.length} irmãos vinculados)
+                        Núcleo Familiar ({(card.alunosVinculadosFamilia ?? []).length} irmãos vinculados)
                       </span>
                     </div>
                   )}

@@ -962,7 +962,7 @@ describe('Auditoria Obrigatória — Ajustes e Melhorias no Sistema Microlins', 
     );
     assert.equal(perm18.tempoPermanenciaMinutos, 18);
     assert.equal(perm18.isTempoInsuficiente, true);
-    assert.ok(perm18.tempoPermanenciaLabel.toLowerCase().includes('tempo insuficiente'));
+    assert.ok((perm18.tempoPermanenciaLabel || '').toLowerCase().includes('tempo insuficiente'));
 
     // Sessão pausada em múltiplos dias (ex.: iniciou dia 28/10 e concluiu dia 30/10) não deve ser marcada como Tempo Insuficiente
     const permMultiDay = calculateTempoPermanencia(
@@ -1086,14 +1086,14 @@ describe('Auditoria Obrigatória — Ajustes e Melhorias no Sistema Microlins', 
     assert.equal(cardAghata.nivelCruzamento, 'NOME_RESPONSAVEL');
     assert.equal(cardAghata.isVinculoFamiliarAmbiguo, false);
     assert.ok(
-      cardAghata.respondenteVinculoLabel.includes('Ednéia Da Rosa') &&
-        cardAghata.respondenteVinculoLabel.includes('Aghata Da Rosa Ribeiro'),
+      (cardAghata.respondenteVinculoLabel || '').includes('Ednéia Da Rosa') &&
+        (cardAghata.respondenteVinculoLabel || '').includes('Aghata Da Rosa Ribeiro'),
       `Subtítulo de vínculo inesperado: ${cardAghata.respondenteVinculoLabel}`
     );
 
     // Cenário 2 (Irmãos na mesma unidade com mesmo responsável no ciclo): Elton Barbosa de Paulo -> Emili Vitoria (#5081421) e Lucas Gabriel (#5081445)
     const siblingCards = allNpsCards.filter((c) =>
-      c.respondenteNome.toLowerCase().includes('elton barbosa de paulo')
+      (c.respondenteNome || '').toLowerCase().includes('elton barbosa de paulo')
     );
     assert.equal(
       siblingCards.length,
@@ -1103,7 +1103,7 @@ describe('Auditoria Obrigatória — Ajustes e Melhorias no Sistema Microlins', 
     const familyCard = siblingCards[0];
     assert.equal(familyCard.npsDestinatario, 'RESPONSAVEL');
     assert.equal(familyCard.isVinculoFamiliarAmbiguo, true);
-    assert.equal(familyCard.alunosVinculadosFamilia.length, 2);
+    assert.equal((familyCard.alunosVinculadosFamilia || []).length, 2);
     assert.ok(familyCard.linkedContrato.includes('5081421'));
     assert.ok(familyCard.linkedContrato.includes('5081445'));
 
