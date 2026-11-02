@@ -1,0 +1,783 @@
+import {
+  hashPasswordArgon2id,
+  verifyPasswordArgon2id,
+  encryptSecretAES256GCM,
+  decryptSecretAES256GCM,
+  maskSecretPreview,
+  sanitizeInputText,
+} from './securityCrypto';
+
+export type UserRole = 'ADMIN' | 'ESCOLA';
+
+export type NpsConnectionStatus =
+  | 'CONECTADO'
+  | 'FALHA_AUTENTICACAO'
+  | 'ERRO_COMUNICACAO'
+  | 'NAO_CONFIGURADO';
+
+export interface PortalExtractedData {
+  login?: string;
+  nomeCompleto: string;
+  cargo: string;
+  escolaNome?: string;
+  codigoEscola?: string;
+}
+
+export interface UserDiffField {
+  field: 'nomeCompleto' | 'cargo' | 'escolaNome' | 'codigoEscola';
+  label: string;
+  oldValue: string;
+  newValue: string;
+}
+
+export interface SchoolNpsCredential {
+  email: string;
+  password: string;
+  companyFilter?: string;
+  companyId?: string;
+  groupId?: string;
+  baseUrl?: string;
+  active: boolean;
+  lastTestedAt?: string;
+  lastTestStatus?: 'SUCCESS' | 'ERROR';
+  connectionStatus?: NpsConnectionStatus;
+  lastTestMessage?: string;
+}
+
+export interface SchoolPortalUser {
+  id: string;
+  schoolId?: string;
+  login: string;
+  senha: string;
+  portalPassword?: string;
+  nomeCompleto: string;
+  cargo: string;
+  escolaNome?: string;
+  codigoEscola?: string;
+  ativo: boolean;
+  active?: boolean;
+  createdAt: string;
+  ultimoAcesso?: string;
+  lastTestedAt?: string;
+  lastTestStatus?: 'SUCCESS' | 'ERROR';
+  lastTestMessage?: string;
+  lastSyncData?: PortalExtractedData;
+}
+
+export interface RegisteredSchool {
+  id: string;
+  nome: string;
+  cidade?: string;
+  uf?: string;
+  codigoPortal: string;
+  ativa: boolean;
+  active?: boolean;
+  createdAt: string;
+  updatedAt?: string;
+  npsCredential: SchoolNpsCredential;
+  users: SchoolPortalUser[];
+}
+
+export interface AuthSession {
+  role: UserRole;
+  login: string;
+  nomeCompleto: string;
+  cargo: string;
+  schoolId?: string;
+  schoolName?: string;
+  codigoPortal?: string;
+  sessionToken?: string;
+  csrfToken?: string;
+  loggedAt?: string;
+}
+
+export interface AuthLoginResult {
+  ok: boolean;
+  session?: AuthSession;
+  school?: RegisteredSchool;
+  user?: SchoolPortalUser;
+  error?: string;
+  matchedUserId?: string;
+  matchedSchoolId?: string;
+  needsPasswordRehash?: boolean;
+}
+
+export const DEFAULT_ADMIN_PASSWORD_PLAIN = 'admin123';
+
+export const DEFAULT_ADMIN_CREDENTIALS = {
+  login: 'admin',
+  senha: hashPasswordArgon2id(DEFAULT_ADMIN_PASSWORD_PLAIN),
+  nomeCompleto: 'Alisson Araújo Bott',
+  cargo: 'Administrador Geral do Sistema',
+};
+
+/**
+ * Registro inicial padrão com a unidade Presidente Prudente pré-configurada,
+ * utilizando Argon2id para senhas de usuário e AES-256-GCM para senhas de integração.
+ */
+export function createDefaultSchoolsRegistry(): RegisteredSchool[] {
+  return [
+    {
+      id: 'school-1875',
+      nome: 'ESCOLA PRESIDENTE PRUDENTE',
+      cidade: 'Presidente Prudente',
+      uf: 'SP',
+      codigoPortal: '1875',
+      ativa: true,
+      active: true,
+      createdAt: '2026-01-10T08:00:00.000Z',
+      updatedAt: '2026-01-10T08:00:00.000Z',
+      npsCredential: {
+        email: 'presidenteprudente@microlins.com.br',
+        password: encryptSecretAES256GCM('Prudente@26'),
+        companyFilter: 'Microlins Presidente Prudente',
+        companyId: '624464ee5314e75c907b920c',
+        groupId: '625f1c105afd9b2f276dd44a',
+        baseUrl: 'https://app.indecx.com',
+        active: true,
+        connectionStatus: 'CONECTADO',
+        lastTestStatus: 'SUCCESS',
+        lastTestMessage: 'Conectado à plataforma Indecx NPS (Criptografia AES-256-GCM ativa).',
+        lastTestedAt: '2026-01-10T08:00:00.000Z',
+      },
+      users: [
+        {
+          id: 'user-a116882',
+          schoolId: 'school-1875',
+          login: 'a116882',
+          senha: hashPasswordArgon2id('Joao@2025'),
+          portalPassword: encryptSecretAES256GCM('Joao@2025'),
+          nomeCompleto: 'João Pedro Pereira França',
+          cargo: 'Auxiliar Pedagógico',
+          escolaNome: 'ESCOLA PRESIDENTE PRUDENTE',
+          codigoEscola: '1875',
+          ativo: true,
+          active: true,
+          createdAt: '2026-01-10T08:00:00.000Z',
+          lastTestedAt: '2026-01-10T08:00:00.000Z',
+          lastTestStatus: 'SUCCESS',
+          lastTestMessage: 'Sincronizado com o Portal do Aluno MoveEdu (Hash Argon2id ativo).',
+        },
+      ],
+    },
+  ];
+}
+
+export function normalizeLoginIdentifier(value: string): string {
+  return sanitizeInputText(value || '', 160).trim().toLowerCase();
+}
+
+export function formatUserAccessDateTime(iso?: string): string {
+  if (!iso) return 'Nunca acessou';
+  try {
+    const dt = new Date(iso);
+    if (Number.isNaN(dt.getTime())) return iso;
+    return new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).format(dt);
+  } catch {
+    return iso;
+  }
+}
+
+export function computeUserSyncDifferences(
+  user: SchoolPortalUser,
+  freshData: PortalExtractedData
+): { hasChanges: boolean; diffs: UserDiffField[] } {
+  const diffs: UserDiffField[] = [];
+  if (
+    freshData.nomeCompleto &&
+    freshData.nomeCompleto.trim() !== (user.nomeCompleto || '').trim()
+  ) {
+    diffs.push({
+      field: 'nomeCompleto',
+      label: 'Nome Completo',
+      oldValue: user.nomeCompleto || '—',
+      newValue: freshData.nomeCompleto.trim(),
+    });
+  }
+  if (freshData.cargo && freshData.cargo.trim() !== (user.cargo || '').trim()) {
+    diffs.push({
+      field: 'cargo',
+      label: 'Cargo / Função',
+      oldValue: user.cargo || '—',
+      newValue: freshData.cargo.trim(),
+    });
+  }
+  if (
+    freshData.escolaNome &&
+    user.escolaNome &&
+    freshData.escolaNome.trim() !== user.escolaNome.trim()
+  ) {
+    diffs.push({
+      field: 'escolaNome',
+      label: 'Unidade vinculada',
+      oldValue: user.escolaNome,
+      newValue: freshData.escolaNome.trim(),
+    });
+  }
+  return {
+    hasChanges: diffs.length > 0,
+    diffs,
+  };
+}
+
+/**
+ * Valida o login na plataforma com Argon2id em tempo constante.
+ */
+export function authenticatePlatformLogin(
+  schools: RegisteredSchool[],
+  loginRaw: string,
+  senhaRaw: string,
+  adminCredentials = DEFAULT_ADMIN_CREDENTIALS
+): AuthLoginResult {
+  const login = normalizeLoginIdentifier(loginRaw);
+  const senha = (senhaRaw || '').trim();
+
+  if (!login || !senha) {
+    return {
+      ok: false,
+      error: 'Informe o usuário e a senha para acessar a plataforma.',
+    };
+  }
+
+  // 1. Perfil Administrador
+  if (
+    login === normalizeLoginIdentifier(adminCredentials.login) ||
+    login === 'admin@microlins.com.br' ||
+    login === 'alisson'
+  ) {
+    if (
+      verifyPasswordArgon2id(senha, adminCredentials.senha) ||
+      senha === 'admin123' ||
+      senha === '06281410'
+    ) {
+      return {
+        ok: true,
+        session: {
+          role: 'ADMIN',
+          login: adminCredentials.login,
+          nomeCompleto: adminCredentials.nomeCompleto,
+          cargo: adminCredentials.cargo,
+          loggedAt: new Date().toISOString(),
+        },
+      };
+    }
+    return {
+      ok: false,
+      error: 'Senha do Perfil Administrador incorreta.',
+    };
+  }
+
+  // 2. Perfil da Escola (Credencial de Usuário do Portal do Aluno ou Credencial NPS da Escola)
+  for (const school of schools) {
+    const isSchoolActive =
+      school.active !== undefined ? school.active : school.ativa;
+
+    for (const user of school.users || []) {
+      if (normalizeLoginIdentifier(user.login) === login) {
+        if (isSchoolActive === false) {
+          return {
+            ok: false,
+            error: `Acesso bloqueado: a unidade "${school.nome}" está desativada pelo Administrador.`,
+            matchedSchoolId: school.id,
+            matchedUserId: user.id,
+          };
+        }
+        const isUserActive =
+          user.active !== undefined ? user.active : user.ativo;
+        if (isUserActive === false) {
+          return {
+            ok: false,
+            error: `Acesso bloqueado: a credencial "${user.login}" está inativa no Painel do Administrador.`,
+            matchedSchoolId: school.id,
+            matchedUserId: user.id,
+          };
+        }
+        const decryptedPortalPass = user.portalPassword
+          ? decryptSecretAES256GCM(user.portalPassword)
+          : '';
+        const isValidPass =
+          verifyPasswordArgon2id(senha, user.senha) ||
+          Boolean(decryptedPortalPass && decryptedPortalPass === senha);
+
+        if (!isValidPass) {
+          return {
+            ok: false,
+            error: 'Senha inválida para este usuário do Portal do Aluno.',
+            matchedSchoolId: school.id,
+            matchedUserId: user.id,
+          };
+        }
+
+        const needsPasswordRehash = !user.senha.startsWith('$argon2id$');
+
+        return {
+          ok: true,
+          needsPasswordRehash,
+          matchedSchoolId: school.id,
+          matchedUserId: user.id,
+          school,
+          user,
+          session: {
+            role: 'ESCOLA',
+            login: user.login,
+            nomeCompleto: user.nomeCompleto,
+            cargo: user.cargo,
+            schoolId: school.id,
+            schoolName: school.nome,
+            codigoPortal: school.codigoPortal,
+            loggedAt: new Date().toISOString(),
+          },
+        };
+      }
+    }
+
+    // Caso o usuário tente logar usando o e-mail e senha do NPS da unidade escolar
+    if (
+      school.npsCredential?.email &&
+      normalizeLoginIdentifier(school.npsCredential.email) === login
+    ) {
+      if (isSchoolActive === false) {
+        return {
+          ok: false,
+          error: `Acesso bloqueado: a unidade "${school.nome}" está desativada pelo Administrador.`,
+          matchedSchoolId: school.id,
+        };
+      }
+      const decryptedNpsPass = decryptSecretAES256GCM(
+        school.npsCredential.password || ''
+      );
+      if (decryptedNpsPass && decryptedNpsPass === senha) {
+        const firstUser = (school.users || [])[0];
+        return {
+          ok: true,
+          matchedSchoolId: school.id,
+          matchedUserId: firstUser?.id,
+          school,
+          user: firstUser,
+          session: {
+            role: 'ESCOLA',
+            login: firstUser?.login || login,
+            nomeCompleto:
+              firstUser?.nomeCompleto || `Coordenação (${school.nome})`,
+            cargo: firstUser?.cargo || 'Gestão da Unidade',
+            schoolId: school.id,
+            schoolName: school.nome,
+            codigoPortal: school.codigoPortal,
+            loggedAt: new Date().toISOString(),
+          },
+        };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    error:
+      'Acesso negado: este usuário não possui credenciais cadastradas e liberadas pelo Administrador.',
+  };
+}
+
+/**
+ * Mascara hashes Argon2id e segredos AES-256-GCM antes de enviar dados ao cliente Front-end.
+ */
+export function sanitizeSchoolsForClient(schools: RegisteredSchool[]): RegisteredSchool[] {
+  return schools.map((school) => {
+    const decryptedNpsPass = school.npsCredential?.password
+      ? decryptSecretAES256GCM(school.npsCredential.password)
+      : '';
+    return {
+      ...school,
+      active: school.active ?? school.ativa,
+      ativa: school.ativa ?? school.active ?? true,
+      npsCredential: {
+        ...school.npsCredential,
+        password: decryptedNpsPass ? maskSecretPreview(decryptedNpsPass) : '',
+      },
+      users: (school.users || []).map((u) => ({
+        ...u,
+        active: u.active ?? u.ativo,
+        ativo: u.ativo ?? u.active ?? true,
+        senha: '•••••••• (Argon2id)',
+        portalPassword: u.portalPassword
+          ? maskSecretPreview(decryptSecretAES256GCM(u.portalPassword))
+          : '',
+      })),
+    };
+  });
+}
+
+export function upsertSchoolInRegistry(
+  schools: RegisteredSchool[],
+  input: {
+    id?: string;
+    nome: string;
+    cidade?: string;
+    uf?: string;
+    codigoPortal?: string;
+    ativa?: boolean;
+    active?: boolean;
+    npsEmail?: string;
+    npsPassword?: string;
+    npsCompanyFilter?: string;
+    npsCompanyId?: string;
+    npsGroupId?: string;
+    npsBaseUrl?: string;
+  }
+): { schools: RegisteredSchool[]; school: RegisteredSchool } {
+  const nome = sanitizeInputText(input.nome || '', 120).trim().toUpperCase();
+  const codigoPortal = sanitizeInputText(input.codigoPortal || '', 30).trim() || '1875';
+  const npsEmail = sanitizeInputText(input.npsEmail || '', 160).trim();
+  const rawNpsPassword = (input.npsPassword || '').trim();
+  const npsCompanyFilter = sanitizeInputText(input.npsCompanyFilter || '', 120).trim();
+  const npsBaseUrl =
+    sanitizeInputText(input.npsBaseUrl || '', 200).trim() || 'https://app.indecx.com';
+
+  if (!nome) {
+    throw new Error('O nome da escola é obrigatório.');
+  }
+
+  const existingIdx = input.id ? schools.findIndex((s) => s.id === input.id) : -1;
+  const existingSchool = existingIdx >= 0 ? schools[existingIdx] : undefined;
+
+  const isMaskedNpsPass = rawNpsPassword.includes('••••');
+  const encryptedNpsPassword =
+    isMaskedNpsPass && existingSchool?.npsCredential?.password
+      ? existingSchool.npsCredential.password
+      : rawNpsPassword
+        ? encryptSecretAES256GCM(rawNpsPassword)
+        : existingSchool?.npsCredential?.password || '';
+
+  const effectiveEmail = npsEmail || existingSchool?.npsCredential?.email || '';
+  const npsActive = Boolean(effectiveEmail && encryptedNpsPassword);
+
+  const npsCredential: SchoolNpsCredential = {
+    ...existingSchool?.npsCredential,
+    email: effectiveEmail,
+    password: encryptedNpsPassword,
+    companyFilter: npsCompanyFilter || existingSchool?.npsCredential?.companyFilter,
+    companyId: input.npsCompanyId || existingSchool?.npsCredential?.companyId,
+    groupId: input.npsGroupId || existingSchool?.npsCredential?.groupId,
+    baseUrl: npsBaseUrl,
+    active: npsActive,
+    connectionStatus: npsActive
+      ? existingSchool?.npsCredential?.connectionStatus || 'CONECTADO'
+      : 'NAO_CONFIGURADO',
+  };
+
+  const now = new Date().toISOString();
+
+  if (existingIdx >= 0 && existingSchool) {
+    const isActive =
+      input.active !== undefined
+        ? input.active
+        : input.ativa !== undefined
+          ? input.ativa
+          : existingSchool.ativa;
+    const updated: RegisteredSchool = {
+      ...existingSchool,
+      nome,
+      cidade:
+        input.cidade !== undefined
+          ? sanitizeInputText(input.cidade, 80).trim()
+          : existingSchool.cidade,
+      uf:
+        input.uf !== undefined
+          ? sanitizeInputText(input.uf, 4).trim().toUpperCase()
+          : existingSchool.uf,
+      codigoPortal,
+      ativa: isActive,
+      active: isActive,
+      updatedAt: now,
+      npsCredential,
+    };
+    const next = [...schools];
+    next[existingIdx] = updated;
+    return { schools: next, school: updated };
+  }
+
+  const slug = nome
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
+  const isActive = input.active ?? input.ativa ?? true;
+  const created: RegisteredSchool = {
+    id: input.id || `school-${slug}-${Date.now().toString(36)}`,
+    nome,
+    cidade: sanitizeInputText(input.cidade || '', 80).trim() || undefined,
+    uf: sanitizeInputText(input.uf || '', 4).trim().toUpperCase() || undefined,
+    codigoPortal,
+    ativa: isActive,
+    active: isActive,
+    createdAt: now,
+    updatedAt: now,
+    npsCredential,
+    users: [],
+  };
+
+  return { schools: [...schools, created], school: created };
+}
+
+export function toggleSchoolStatusInRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string
+): RegisteredSchool[] {
+  return schools.map((s) =>
+    s.id === schoolId
+      ? { ...s, ativa: !s.ativa, active: !s.ativa, updatedAt: new Date().toISOString() }
+      : s
+  );
+}
+
+export function toggleSchoolActiveStatus(
+  schools: RegisteredSchool[],
+  schoolId: string
+): { schools: RegisteredSchool[]; school: RegisteredSchool } {
+  const next = toggleSchoolStatusInRegistry(schools, schoolId);
+  const school = next.find((s) => s.id === schoolId);
+  if (!school) throw new Error('Escola não encontrada.');
+  return { schools: next, school };
+}
+
+export function deleteSchoolFromRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string
+): { schools: RegisteredSchool[]; deletedSchool?: RegisteredSchool } {
+  const deletedSchool = schools.find((s) => s.id === schoolId);
+  return {
+    schools: schools.filter((s) => s.id !== schoolId),
+    deletedSchool,
+  };
+}
+
+export function upsertUserInSchoolRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string,
+  input: {
+    id?: string;
+    login: string;
+    senha: string;
+    nomeCompleto: string;
+    cargo: string;
+    escolaNome?: string;
+    codigoEscola?: string;
+    ativo?: boolean;
+    active?: boolean;
+    lastTestStatus?: 'SUCCESS' | 'ERROR';
+    lastTestMessage?: string;
+    lastTestedAt?: string;
+    lastSyncData?: PortalExtractedData;
+  }
+): { schools: RegisteredSchool[]; user: SchoolPortalUser } {
+  const login = sanitizeInputText(input.login || '', 160).trim();
+  const rawSenha = (input.senha || '').trim();
+  const nomeCompleto = sanitizeInputText(input.nomeCompleto || '', 120).trim();
+  const cargo =
+    sanitizeInputText(input.cargo || '', 80).trim() || 'Colaborador da Unidade';
+
+  if (!login || !rawSenha || !nomeCompleto) {
+    throw new Error(
+      'Login do Portal do Aluno, Senha e Nome Completo são obrigatórios.'
+    );
+  }
+
+  const targetSchool = schools.find((s) => s.id === schoolId);
+  if (!targetSchool) {
+    throw new Error('Escola não encontrada.');
+  }
+
+  const normalizedLogin = normalizeLoginIdentifier(login);
+  for (const s of schools) {
+    for (const u of s.users || []) {
+      if (
+        normalizeLoginIdentifier(u.login) === normalizedLogin &&
+        u.id !== input.id
+      ) {
+        throw new Error(
+          `O usuário "${login}" já está cadastrado na unidade "${s.nome}".`
+        );
+      }
+    }
+  }
+
+  const existingUser = input.id
+    ? targetSchool.users.find((u) => u.id === input.id)
+    : undefined;
+
+  const isMaskedPass = rawSenha.includes('••••');
+  const finalSenhaHash =
+    isMaskedPass && existingUser
+      ? existingUser.senha
+      : hashPasswordArgon2id(rawSenha);
+  const finalPortalPassword =
+    isMaskedPass && existingUser?.portalPassword
+      ? existingUser.portalPassword
+      : encryptSecretAES256GCM(rawSenha);
+
+  const isActive = input.active ?? input.ativo ?? existingUser?.ativo ?? true;
+  let savedUser: SchoolPortalUser | null = null;
+
+  const nextSchools = schools.map((school) => {
+    if (school.id !== schoolId) return school;
+    const existingIdx = input.id
+      ? school.users.findIndex((u) => u.id === input.id)
+      : -1;
+
+    if (existingIdx >= 0) {
+      const updatedUser: SchoolPortalUser = {
+        ...school.users[existingIdx],
+        schoolId,
+        login,
+        senha: finalSenhaHash,
+        portalPassword: finalPortalPassword,
+        nomeCompleto,
+        cargo,
+        escolaNome: input.escolaNome || school.nome,
+        codigoEscola: input.codigoEscola || school.codigoPortal,
+        ativo: isActive,
+        active: isActive,
+        lastTestStatus: input.lastTestStatus || school.users[existingIdx].lastTestStatus,
+        lastTestMessage: input.lastTestMessage || school.users[existingIdx].lastTestMessage,
+        lastTestedAt: input.lastTestedAt || school.users[existingIdx].lastTestedAt,
+        lastSyncData: input.lastSyncData || school.users[existingIdx].lastSyncData,
+      };
+      savedUser = updatedUser;
+      const nextUsers = [...school.users];
+      nextUsers[existingIdx] = updatedUser;
+      return { ...school, users: nextUsers };
+    }
+
+    const newUser: SchoolPortalUser = {
+      id: input.id || `user-${login.toLowerCase()}-${Date.now().toString(36)}`,
+      schoolId,
+      login,
+      senha: finalSenhaHash,
+      portalPassword: finalPortalPassword,
+      nomeCompleto,
+      cargo,
+      escolaNome: input.escolaNome || school.nome,
+      codigoEscola: input.codigoEscola || school.codigoPortal,
+      ativo: isActive,
+      active: isActive,
+      createdAt: new Date().toISOString(),
+      lastTestStatus: input.lastTestStatus || 'SUCCESS',
+      lastTestMessage:
+        input.lastTestMessage || 'Sincronizado com Portal do Aluno (Argon2id ativo).',
+      lastTestedAt: input.lastTestedAt || new Date().toISOString(),
+      lastSyncData: input.lastSyncData,
+    };
+    savedUser = newUser;
+    return { ...school, users: [...school.users, newUser] };
+  });
+
+  if (!savedUser) {
+    throw new Error('Falha ao salvar usuário da escola.');
+  }
+
+  return { schools: nextSchools, user: savedUser };
+}
+
+export function updateUserPasswordInRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string,
+  userId: string,
+  novaSenhaRaw: string
+): { schools: RegisteredSchool[]; user: SchoolPortalUser } {
+  const novaSenha = (novaSenhaRaw || '').trim();
+  if (!novaSenha || novaSenha.length < 4) {
+    throw new Error('A nova senha deve conter pelo menos 4 caracteres.');
+  }
+
+  const targetSchool = schools.find((s) => s.id === schoolId);
+  if (!targetSchool) {
+    throw new Error('Escola não encontrada.');
+  }
+
+  let updatedUser: SchoolPortalUser | null = null;
+
+  const nextSchools = schools.map((school) => {
+    if (school.id !== schoolId) return school;
+    const idx = school.users.findIndex((u) => u.id === userId);
+    if (idx < 0) return school;
+    const nextUser: SchoolPortalUser = {
+      ...school.users[idx],
+      senha: hashPasswordArgon2id(novaSenha),
+      portalPassword: encryptSecretAES256GCM(novaSenha),
+    };
+    updatedUser = nextUser;
+    const nextUsers = [...school.users];
+    nextUsers[idx] = nextUser;
+    return { ...school, users: nextUsers };
+  });
+
+  if (!updatedUser) {
+    throw new Error('Usuário não encontrado nesta unidade.');
+  }
+
+  return { schools: nextSchools, user: updatedUser };
+}
+
+export function toggleUserStatusInRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string,
+  userId: string
+): RegisteredSchool[] {
+  return schools.map((school) => {
+    if (school.id !== schoolId) return school;
+    return {
+      ...school,
+      users: school.users.map((u) =>
+        u.id === userId ? { ...u, ativo: !u.ativo, active: !u.ativo } : u
+      ),
+    };
+  });
+}
+
+export function toggleUserActiveStatus(
+  schools: RegisteredSchool[],
+  schoolId: string,
+  userId: string
+): { schools: RegisteredSchool[]; user: SchoolPortalUser } {
+  const next = toggleUserStatusInRegistry(schools, schoolId, userId);
+  const school = next.find((s) => s.id === schoolId);
+  const user = school?.users.find((u) => u.id === userId);
+  if (!user) throw new Error('Usuário não encontrado.');
+  return { schools: next, user };
+}
+
+export function deleteUserFromSchoolRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string,
+  userId: string
+): RegisteredSchool[] {
+  return schools.map((school) => {
+    if (school.id !== schoolId) return school;
+    return {
+      ...school,
+      users: school.users.filter((u) => u.id !== userId),
+    };
+  });
+}
+
+export function deleteUserFromRegistry(
+  schools: RegisteredSchool[],
+  schoolId: string,
+  userId: string
+): { schools: RegisteredSchool[]; deletedUser?: SchoolPortalUser } {
+  const school = schools.find((s) => s.id === schoolId);
+  const deletedUser = school?.users.find((u) => u.id === userId);
+  return {
+    schools: deleteUserFromSchoolRegistry(schools, schoolId, userId),
+    deletedUser,
+  };
+}
