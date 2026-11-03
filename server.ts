@@ -62,6 +62,21 @@ import {
   PRIVACY_KNOWLEDGE_BASE,
   searchPrivacyKnowledgeBase,
 } from './src/utils/privacyKnowledgeBase';
+import {
+  checkSupabaseHealth,
+  createLgpdRequestInSupabase,
+  deleteSchoolFromSupabase,
+  deleteUserFromSupabase,
+  fetchStudentRecords as fetchStudentRecordsFromSupabase,
+  recordAuditLogInSupabase,
+  supabase,
+  toggleUserStatusInSupabase,
+  updateUserPasswordInSupabase,
+  upsertNpsRecordsToSupabase,
+  upsertSchoolInSupabase,
+  upsertStudentRecordsToSupabase,
+  upsertUserInSupabase,
+} from './src/utils/supabaseClient';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -109,19 +124,30 @@ const portalSession: PortalSessionState = {
 
 function seedDefaultPresidentePrudenteCache() {
   const educatorsMap = getStudentEducatorsMap(PORTAL_MICROLINS_ESCOLA);
-  portalSession.cachedAllWeekRecords = ALL_WEEK_STUDENT_RECORDS.map((r) => {
-    const cached = educatorsMap.get(r.contrato);
-    return cached
-      ? { ...r, educador: cached.educadorNome, educadorCachedAt: cached.updatedAt }
-      : r;
-  });
-  for (const [code, label] of Object.entries(PORTAL_WEEKDAY_MAP)) {
-    const dayRecords = portalSession.cachedAllWeekRecords.filter((r) => r.diaSemana === label);
-    portalSession.cachedBySemana.set(code, {
-      records: dayRecords,
-      fetchedAt: 0,
-    });
-  }
+  fetchStudentRecordsFromSupabase()
+    .then((remoteRecords) => {
+      if (remoteRecords && remoteRecords.length > 0) {
+        portalSession.cachedAllWeekRecords = remoteRecords.map((r) => {
+          const cached = educatorsMap.get(r.contrato);
+          return cached && !r.educador
+            ? { ...r, educador: cached.educadorNome, educadorCachedAt: cached.updatedAt }
+            : r;
+        });
+        for (const [code, label] of Object.entries(PORTAL_WEEKDAY_MAP)) {
+          const dayRecords = portalSession.cachedAllWeekRecords.filter(
+            (r) => r.diaSemana === label
+          );
+          const existing = portalSession.cachedBySemana.get(code);
+          if (!existing || existing.fetchedAt === 0) {
+            portalSession.cachedBySemana.set(code, {
+              records: dayRecords,
+              fetchedAt: 0,
+            });
+          }
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 seedDefaultPresidentePrudenteCache();
@@ -240,9 +266,9 @@ async function authenticatePortalSession(forceRenew = false): Promise<boolean> {
 
     const r3 = await fetch('https://portaldoaluno.microlins.com.br/login/', {
       method: 'POST',
+      redirect: 'manual',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'X-Requested-With': 'XMLHttpRequest',
         Cookie: serializeCookieJar(jar),
       },
       body: new URLSearchParams({
@@ -255,7 +281,7 @@ async function authenticatePortalSession(forceRenew = false): Promise<boolean> {
       signal: controller.signal,
     });
     collectResponseCookies(r3, jar);
-    if (!r3.ok) return false;
+    if (!r3.ok && (r3.status < 300 || r3.status >= 400)) return false;
 
     portalSession.cookies = jar;
     portalSession.expiresAt = now + 25 * 60 * 1000;
@@ -264,6 +290,34 @@ async function authenticatePortalSession(forceRenew = false): Promise<boolean> {
     return false;
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function parsePortalJsonResponse<T>(res: Response): Promise<T | null> {
+  try {
+    const rawText = await res.text();
+    if (!rawText) return null;
+    const trimmed = rawText.trim();
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      return JSON.parse(trimmed) as T;
+    }
+    // O Portal do Aluno por vezes antecipa tags <meta> ou <script> antes do payload JSON
+    const scriptEndIdx = trimmed.lastIndexOf('</script>');
+    const searchFrom = scriptEndIdx >= 0 ? scriptEndIdx + 9 : 0;
+    const objIdx = trimmed.indexOf('{', searchFrom);
+    const arrIdx = trimmed.indexOf('[', searchFrom);
+    const startIdx =
+      objIdx >= 0 && arrIdx >= 0
+        ? Math.min(objIdx, arrIdx)
+        : objIdx >= 0
+          ? objIdx
+          : arrIdx;
+    if (startIdx >= 0) {
+      return JSON.parse(trimmed.slice(startIdx)) as T;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -404,9 +458,9 @@ async function extractEducatorFromContractLive(
         'https://portaldoaluno.microlins.com.br/login/',
         {
           method: 'POST',
+          redirect: 'manual',
           headers: {
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
             Cookie: serializeCookieJar(studentJar),
           },
           body: new URLSearchParams({
@@ -420,7 +474,7 @@ async function extractEducatorFromContractLive(
         }
       );
       collectResponseCookies(rLogin, studentJar);
-      if (!rLogin.ok) return null;
+      if (!rLogin.ok && (rLogin.status < 300 || rLogin.status >= 400)) return null;
 
       const rHome = await fetch(
         'https://portaldoaluno.microlins.com.br/home/',
@@ -448,24 +502,30 @@ async function extractEducatorFromContractLive(
       if (match && match[1]) {
         const rawName = match[1].replace(/<[^>]+>/g, '').trim();
         if (rawName && rawName.length > 2) {
+          const nowIso = new Date().toISOString();
           upsertStudentEducator(
             cleanContrato,
             alunoNome || '',
             rawName,
             PORTAL_MICROLINS_ESCOLA
           );
+          supabase
+            .from('student_records')
+            .update({ educador: rawName, educador_cached_at: nowIso })
+            .eq('contrato', cleanContrato)
+            .then(() => {});
           // Atualiza em tempo real a lista de alunos em memória
           for (const rec of portalSession.cachedAllWeekRecords) {
             if (rec.contrato === cleanContrato) {
               rec.educador = rawName;
-              rec.educadorCachedAt = new Date().toISOString();
+              rec.educadorCachedAt = nowIso;
             }
           }
           for (const [, dayCache] of portalSession.cachedBySemana) {
             for (const rec of dayCache.records) {
               if (rec.contrato === cleanContrato) {
                 rec.educador = rawName;
-                rec.educadorCachedAt = new Date().toISOString();
+                rec.educadorCachedAt = nowIso;
               }
             }
           }
@@ -755,11 +815,13 @@ async function fetchSingleWeekdayPortalRecords(
       }
     }
 
-    const dados = (await rAlunos.json()) as {
+    const dados = await parsePortalJsonResponse<{
       listaAlunos?: Array<Record<string, unknown>>;
-    };
+    }>(rAlunos);
     const notasDict = rNotas.ok
-      ? ((await rNotas.json()) as Record<string, { Aula?: string; UltimaNota?: string }>)
+      ? (await parsePortalJsonResponse<
+          Record<string, { Aula?: string; UltimaNota?: string }>
+        >(rNotas)) || {}
       : {};
 
     if (!dados || !Array.isArray(dados.listaAlunos)) {
@@ -781,8 +843,12 @@ async function fetchSingleWeekdayPortalRecords(
     // Rebuild combined weekly cache without duplicates
     const combined: StudentPerformanceRecord[] = [];
     let globalId = 1;
+    let allWeekdaysLiveFetched = true;
     for (const code of ['1', '2', '3', '4', '5', '6', '7']) {
       const dayEntry = portalSession.cachedBySemana.get(code);
+      if (code !== '7' && (!dayEntry || dayEntry.fetchedAt === 0)) {
+        allWeekdaysLiveFetched = false;
+      }
       if (dayEntry && dayEntry.records.length > 0) {
         for (const rec of dayEntry.records) {
           combined.push({ ...rec, id: globalId++ });
@@ -791,6 +857,9 @@ async function fetchSingleWeekdayPortalRecords(
     }
     if (combined.length > 0) {
       portalSession.cachedAllWeekRecords = combined;
+      if (allWeekdaysLiveFetched) {
+        upsertStudentRecordsToSupabase(combined, false).catch(() => {});
+      }
     }
 
     return {
@@ -811,6 +880,8 @@ async function fetchSingleWeekdayPortalRecords(
   }
 }
 
+let initialFullWeekLiveSyncInFlight = false;
+
 async function syncLivePortalRecords(semanaParam?: string): Promise<{
   records: StudentPerformanceRecord[];
   allWeekRecords: StudentPerformanceRecord[];
@@ -830,6 +901,29 @@ async function syncLivePortalRecords(semanaParam?: string): Promise<{
 
   // Refresh the requested or current weekday live from Portal do Aluno
   const liveDayResult = await fetchSingleWeekdayPortalRecords(targetCode);
+
+  // Ensure all other weekdays (1..6) are also live-fetched so no static Oct 2026 records remain
+  const unfetchedCodes = ['1', '2', '3', '4', '5', '6'].filter((code) => {
+    const entry = portalSession.cachedBySemana.get(code);
+    return !entry || entry.fetchedAt === 0;
+  });
+
+  if (unfetchedCodes.length > 0 && !initialFullWeekLiveSyncInFlight) {
+    initialFullWeekLiveSyncInFlight = true;
+    try {
+      await Promise.all(
+        unfetchedCodes.map((c) => fetchSingleWeekdayPortalRecords(c))
+      );
+      if (portalSession.cachedAllWeekRecords.length > 0) {
+        upsertStudentRecordsToSupabase(
+          portalSession.cachedAllWeekRecords,
+          true
+        ).catch(() => {});
+      }
+    } finally {
+      initialFullWeekLiveSyncInFlight = false;
+    }
+  }
 
   return {
     records: portalSession.cachedAllWeekRecords,
@@ -2090,6 +2184,14 @@ async function startServer() {
         description,
         ipAddress: req.ip || '127.0.0.1',
       });
+      createLgpdRequestInSupabase({
+        requesterName,
+        requesterEmail,
+        requesterRole,
+        requestType,
+        description,
+        ipAddress: req.ip || '127.0.0.1',
+      }).catch(() => {});
       res.status(201).json({
         ok: true,
         request: record,
@@ -2181,7 +2283,7 @@ async function startServer() {
     });
   });
 
-  // POST /api/admin/schools — Cadastra ou atualiza escola no SQLite (Exclusivo Admin)
+  // POST /api/admin/schools — Cadastra ou atualiza escola no SQLite + Supabase (Exclusivo Admin)
   app.post('/api/admin/schools', requireAdmin, (req, res) => {
     try {
       const {
@@ -2208,17 +2310,31 @@ async function startServer() {
         npsBaseUrl,
       });
 
+      upsertSchoolInSupabase({
+        id: result.school.id,
+        nome: result.school.nome,
+        cidade: result.school.cidade,
+        uf: result.school.uf,
+        codigoPortal: result.school.codigoPortal,
+        ativa: result.school.ativa,
+        npsEmail: result.school.npsCredential.email,
+        npsCompanyFilter: result.school.npsCredential.companyFilter,
+        npsBaseUrl: result.school.npsCredential.baseUrl,
+      }).catch(() => {});
+
       refreshSchoolsRegistryCache();
       const session = resolveAuthenticatedSession(req);
-      recordAuditLog({
+      const logEntry = {
         actorLogin: session?.login || 'admin',
         actorRole: 'ADMIN',
         action: id ? 'SCHOOL_UPDATED' : 'SCHOOL_CREATED',
         resource: `schools/${result.school.id}`,
-        status: 'SUCCESS',
+        status: 'SUCCESS' as const,
         ipAddress: req.ip || '127.0.0.1',
-        details: `Unidade "${result.school.nome}" salva no banco SQLite.`,
-      });
+        details: `Unidade "${result.school.nome}" salva no banco SQLite e Supabase.`,
+      };
+      recordAuditLog(logEntry);
+      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
       const sanitizedSchool = sanitizedSchools.find(
@@ -2238,7 +2354,7 @@ async function startServer() {
     }
   });
 
-  // PUT /api/admin/schools/:schoolId — Edita nome ou alterna ativação da escola no SQLite (Exclusivo Admin)
+  // PUT /api/admin/schools/:schoolId — Edita nome ou alterna ativação da escola no SQLite + Supabase (Exclusivo Admin)
   app.put('/api/admin/schools/:schoolId', requireAdmin, (req, res) => {
     const { schoolId } = req.params;
     const { nome, active, ativa } = req.body || {};
@@ -2270,17 +2386,31 @@ async function startServer() {
         npsBaseUrl: existing.npsCredential.baseUrl,
       });
 
+      upsertSchoolInSupabase({
+        id: result.school.id,
+        nome: result.school.nome,
+        cidade: result.school.cidade,
+        uf: result.school.uf,
+        codigoPortal: result.school.codigoPortal,
+        ativa: result.school.ativa,
+        npsEmail: result.school.npsCredential.email,
+        npsCompanyFilter: result.school.npsCredential.companyFilter,
+        npsBaseUrl: result.school.npsCredential.baseUrl,
+      }).catch(() => {});
+
       refreshSchoolsRegistryCache();
       const session = resolveAuthenticatedSession(req);
-      recordAuditLog({
+      const logEntry = {
         actorLogin: session?.login || 'admin',
         actorRole: 'ADMIN',
         action: 'SCHOOL_STATUS_OR_NAME_UPDATED',
         resource: `schools/${schoolId}`,
-        status: 'SUCCESS',
+        status: 'SUCCESS' as const,
         ipAddress: req.ip || '127.0.0.1',
         details: `Escola "${result.school.nome}" atualizada (ativa=${result.school.ativa}).`,
-      });
+      };
+      recordAuditLog(logEntry);
+      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
       res.json({
@@ -2296,24 +2426,27 @@ async function startServer() {
     }
   });
 
-  // DELETE /api/admin/schools/:schoolId — Remove uma escola cadastrada no SQLite (Exclusivo Admin)
+  // DELETE /api/admin/schools/:schoolId — Remove uma escola cadastrada no SQLite + Supabase (Exclusivo Admin)
   app.delete('/api/admin/schools/:schoolId', requireAdmin, (req, res) => {
     const { schoolId } = req.params;
     try {
       const before = getSchoolsFromDb(false).find((s) => s.id === schoolId);
       const nextSchools = deleteSchoolFromDb(schoolId);
+      deleteSchoolFromSupabase(schoolId).catch(() => {});
       refreshSchoolsRegistryCache();
 
       const session = resolveAuthenticatedSession(req);
-      recordAuditLog({
+      const logEntry = {
         actorLogin: session?.login || 'admin',
         actorRole: 'ADMIN',
         action: 'SCHOOL_DELETED',
         resource: `schools/${schoolId}`,
-        status: 'SUCCESS',
+        status: 'SUCCESS' as const,
         ipAddress: req.ip || '127.0.0.1',
         details: `Unidade "${before?.nome || schoolId}" removida.`,
-      });
+      };
+      recordAuditLog(logEntry);
+      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       res.json({
         ok: true,
@@ -2369,17 +2502,29 @@ async function startServer() {
           cargo: extractedData.cargo,
           ativo: true,
         });
+        upsertUserInSupabase(schoolId, {
+          id: upserted.user.id,
+          login: extractedData.login,
+          senha: String(senha).trim(),
+          nomeCompleto: extractedData.nomeCompleto,
+          cargo: extractedData.cargo,
+          escolaNome: extractedData.escolaNome,
+          codigoEscola: extractedData.codigoEscola,
+          ativo: true,
+        }).catch(() => {});
         refreshSchoolsRegistryCache();
         const session = resolveAuthenticatedSession(req);
-        recordAuditLog({
+        const logEntry = {
           actorLogin: session?.login || 'admin',
           actorRole: 'ADMIN',
           action: 'USER_SYNCED_AND_SAVED',
           resource: `schools/${schoolId}/users/${upserted.user.id}`,
-          status: 'SUCCESS',
+          status: 'SUCCESS' as const,
           ipAddress: req.ip || '127.0.0.1',
           details: `Credencial "${upserted.user.login}" (${upserted.user.nomeCompleto}) sincronizada no Portal MoveEdu e salva no banco.`,
-        });
+        };
+        recordAuditLog(logEntry);
+        recordAuditLogInSupabase(logEntry).catch(() => {});
         const sanitizedSchools = sanitizeSchoolsForClient(upserted.schools);
         const sanitizedUser = sanitizedSchools
           .find((s) => s.id === schoolId)
@@ -2412,7 +2557,7 @@ async function startServer() {
     });
   });
 
-  // POST /api/admin/schools/:schoolId/users — Cadastra ou atualiza usuário no SQLite com Argon2id (Exclusivo Admin)
+  // POST /api/admin/schools/:schoolId/users — Cadastra ou atualiza usuário no SQLite + Supabase com Argon2id (Exclusivo Admin)
   app.post('/api/admin/schools/:schoolId/users', requireAdmin, (req, res) => {
     try {
       const { schoolId } = req.params;
@@ -2427,18 +2572,30 @@ async function startServer() {
         cargo,
         ativo: active !== undefined ? Boolean(active) : ativo,
       });
+      upsertUserInSupabase(schoolId, {
+        id: result.user.id,
+        login,
+        senha,
+        nomeCompleto,
+        cargo,
+        escolaNome: result.user.escolaNome,
+        codigoEscola: result.user.codigoEscola,
+        ativo: result.user.ativo,
+      }).catch(() => {});
       refreshSchoolsRegistryCache();
 
       const session = resolveAuthenticatedSession(req);
-      recordAuditLog({
+      const logEntry = {
         actorLogin: session?.login || 'admin',
         actorRole: 'ADMIN',
         action: id ? 'USER_UPDATED' : 'USER_CREATED',
         resource: `schools/${schoolId}/users/${result.user.id}`,
-        status: 'SUCCESS',
+        status: 'SUCCESS' as const,
         ipAddress: req.ip || '127.0.0.1',
         details: `Usuário "${result.user.login}" (${result.user.nomeCompleto}) salvo com hash Argon2id.`,
-      });
+      };
+      recordAuditLog(logEntry);
+      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
       const sanitizedSchool = sanitizedSchools.find((s) => s.id === schoolId);
@@ -2468,18 +2625,23 @@ async function startServer() {
       const { novaSenha } = req.body || {};
       try {
         const result = updateUserPasswordInDb(schoolId, userId, novaSenha);
+        updateUserPasswordInSupabase(schoolId, userId, novaSenha).catch(
+          () => {}
+        );
         refreshSchoolsRegistryCache();
 
         const session = resolveAuthenticatedSession(req);
-        recordAuditLog({
+        const logEntry = {
           actorLogin: session?.login || 'admin',
           actorRole: 'ADMIN',
           action: 'USER_PASSWORD_CHANGED',
           resource: `schools/${schoolId}/users/${userId}`,
-          status: 'SUCCESS',
+          status: 'SUCCESS' as const,
           ipAddress: req.ip || '127.0.0.1',
           details: `Senha do usuário "${result.user.login}" atualizada com Argon2id.`,
-        });
+        };
+        recordAuditLog(logEntry);
+        recordAuditLogInSupabase(logEntry).catch(() => {});
 
         const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
         const sanitizedUser = sanitizedSchools
@@ -2511,6 +2673,7 @@ async function startServer() {
       const { schoolId, userId } = req.params;
       try {
         const nextSchools = toggleUserStatusInDb(schoolId, userId);
+        toggleUserStatusInSupabase(schoolId, userId).catch(() => {});
         refreshSchoolsRegistryCache();
 
         const sanitizedSchools = sanitizeSchoolsForClient(nextSchools);
@@ -2519,15 +2682,17 @@ async function startServer() {
           ?.users.find((u) => u.id === userId);
 
         const session = resolveAuthenticatedSession(req);
-        recordAuditLog({
+        const logEntry = {
           actorLogin: session?.login || 'admin',
           actorRole: 'ADMIN',
           action: 'USER_STATUS_TOGGLED',
           resource: `schools/${schoolId}/users/${userId}`,
-          status: 'SUCCESS',
+          status: 'SUCCESS' as const,
           ipAddress: req.ip || '127.0.0.1',
           details: `Status do usuário "${sanitizedUser?.login || userId}" alterado para ativo=${sanitizedUser?.ativo}.`,
-        });
+        };
+        recordAuditLog(logEntry);
+        recordAuditLogInSupabase(logEntry).catch(() => {});
 
         res.json({
           ok: true,
@@ -2557,18 +2722,21 @@ async function startServer() {
           .find((s) => s.id === schoolId)
           ?.users.find((u) => u.id === userId);
         const nextSchools = deleteUserFromDb(schoolId, userId);
+        deleteUserFromSupabase(schoolId, userId).catch(() => {});
         refreshSchoolsRegistryCache();
 
         const session = resolveAuthenticatedSession(req);
-        recordAuditLog({
+        const logEntry = {
           actorLogin: session?.login || 'admin',
           actorRole: 'ADMIN',
           action: 'USER_DELETED',
           resource: `schools/${schoolId}/users/${userId}`,
-          status: 'SUCCESS',
+          status: 'SUCCESS' as const,
           ipAddress: req.ip || '127.0.0.1',
           details: `Usuário "${beforeUser?.login || userId}" removido.`,
-        });
+        };
+        recordAuditLog(logEntry);
+        recordAuditLogInSupabase(logEntry).catch(() => {});
 
         res.json({
           ok: true,
@@ -2734,33 +2902,21 @@ async function startServer() {
     }
   });
 
-  // GET /api/supabase/status — Verifica status da conexão com o Supabase
+  // GET /api/supabase/status — Verifica status completo da conexão e tabelas do Supabase
   app.get('/api/supabase/status', async (_req, res) => {
-    const supabaseUrl = process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '';
-    const supabaseKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY || '';
-    const configured = Boolean(supabaseUrl && supabaseKey);
-
-    let connectionTest = false;
-    if (configured) {
-      try {
-        const { createClient } = await import('@supabase/supabase-js');
-        const client = createClient(supabaseUrl, supabaseKey);
-        const { error } = await client.from('schools').select('id').limit(1);
-        connectionTest = !error || error.code === 'PGRST116' || error.message.includes('relation');
-      } catch {
-        connectionTest = false;
-      }
+    try {
+      const health = await checkSupabaseHealth();
+      res.json({
+        ok: true,
+        ...health,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        connected: false,
+        error: err?.message || 'Erro ao verificar status do Supabase.',
+      });
     }
-
-    res.json({
-      ok: true,
-      configured,
-      connected: connectionTest,
-      supabaseUrl: supabaseUrl ? supabaseUrl.replace(/https:\/\/([^.]+).*/, 'https://$1.supabase.co') : null,
-      message: configured 
-        ? (connectionTest ? 'Supabase conectado com sucesso!' : 'Supabase configurado, mas tabela ainda não criada ou sem permissão.')
-        : 'Supabase não configurado. Defina VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.'
-    });
   });
 
   if (process.env.NODE_ENV !== 'production') {

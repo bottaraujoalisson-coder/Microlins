@@ -27,6 +27,7 @@ import {
   PrivacyKnowledgeTopic,
   searchPrivacyKnowledgeBase,
 } from '../utils/privacyKnowledgeBase';
+import { createLgpdRequestInSupabase } from '../utils/supabaseClient';
 
 interface PrivacyProtectionViewProps {
   onBack: () => void;
@@ -102,38 +103,38 @@ export const PrivacyProtectionView: React.FC<PrivacyProtectionViewProps> = ({
 
     setIsSubmittingRequest(true);
     try {
-      const res = await fetch('/api/privacy/requests', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          requesterName: requesterName.trim(),
-          requesterEmail: requesterEmail.trim(),
-          requesterRole: requesterRole.trim(),
-          requestType,
-          description: description.trim(),
-        }),
-      });
-      const data = await res.json();
-      if (res.ok && data.ok && data.request) {
-        setRequestFeedback({
-          type: 'success',
-          protocol: data.request.protocol,
-          message:
-            data.message ||
-            `Solicitação registrada com sucesso sob o protocolo ${data.request.protocol}.`,
+      const payload = {
+        requesterName: requesterName.trim(),
+        requesterEmail: requesterEmail.trim(),
+        requesterRole: requesterRole.trim(),
+        requestType,
+        description: description.trim(),
+      };
+
+      const supaRecord = await createLgpdRequestInSupabase(payload);
+
+      try {
+        await fetch('/api/privacy/requests', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
         });
-        setDescription('');
-      } else {
-        setRequestFeedback({
-          type: 'error',
-          message:
-            data?.error || 'Não foi possível registrar a solicitação no momento.',
-        });
+      } catch {
+        // Servidor local opcional (em produção Netlify a gravação já ocorreu no Supabase)
       }
-    } catch {
+
+      setRequestFeedback({
+        type: 'success',
+        protocol: supaRecord.protocol,
+        message: `Solicitação registrada com sucesso no Supabase sob o protocolo ${supaRecord.protocol}.`,
+      });
+      setDescription('');
+    } catch (err: any) {
       setRequestFeedback({
         type: 'error',
-        message: 'Falha de comunicação ao enviar solicitação ao canal LGPD.',
+        message:
+          err?.message ||
+          'Não foi possível registrar a solicitação no canal LGPD.',
       });
     } finally {
       setIsSubmittingRequest(false);

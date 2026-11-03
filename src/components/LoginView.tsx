@@ -17,6 +17,10 @@ import {
   AuthSession,
   RegisteredSchool,
 } from '../utils/authRegistry';
+import {
+  authenticateUserInSupabase,
+  recordAuditLogInSupabase,
+} from '../utils/supabaseClient';
 
 const REMEMBERED_LOGIN_STORAGE_KEY = 'microlins_remembered_login';
 
@@ -94,8 +98,20 @@ export const LoginView: React.FC<LoginViewProps> = ({
         body: JSON.stringify({ login: cleanLogin, senha: cleanSenha }),
       });
 
-      const data = await response.json();
-      if (response.ok && data.ok && data.session) {
+      const contentType = response.headers.get('content-type') || '';
+      const data = contentType.includes('application/json')
+        ? await response.json()
+        : null;
+
+      if (response.ok && data?.ok && data.session) {
+        recordAuditLogInSupabase({
+          actorLogin: data.session.login,
+          actorRole: data.session.role,
+          action: 'AUTH_LOGIN_SUCCESS',
+          resource: 'auth/login',
+          status: 'SUCCESS',
+          details: `Login autenticado com sucesso (${data.session.nomeCompleto}).`,
+        }).catch(() => {});
         onLoginSuccess(data.session, data.metadata);
         return;
       }
@@ -105,6 +121,22 @@ export const LoginView: React.FC<LoginViewProps> = ({
           data?.error ||
             'Conta temporariamente bloqueada por excesso de tentativas inválidas.'
         );
+        return;
+      }
+
+      // Validação direta na tabela `users` e `schools` do Supabase (produção Netlify / serverless)
+      const supaResult = await authenticateUserInSupabase(
+        cleanLogin,
+        cleanSenha
+      );
+      if (supaResult.ok && supaResult.session) {
+        onLoginSuccess(supaResult.session, {
+          unidade: supaResult.school?.nome,
+          codigoUnidade: supaResult.school?.codigoPortal,
+          usuarioLogin: supaResult.user?.login,
+          usuarioNomeCompleto: supaResult.user?.nomeCompleto,
+          usuarioCargo: supaResult.user?.cargo,
+        });
         return;
       }
 
@@ -126,10 +158,26 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
       setErrorMessage(
         data?.error ||
+          supaResult.error ||
           localResult.error ||
           'Credenciais inválidas: verifique seu login e senha.'
       );
     } catch {
+      const supaResult = await authenticateUserInSupabase(
+        cleanLogin,
+        cleanSenha
+      );
+      if (supaResult.ok && supaResult.session) {
+        onLoginSuccess(supaResult.session, {
+          unidade: supaResult.school?.nome,
+          codigoUnidade: supaResult.school?.codigoPortal,
+          usuarioLogin: supaResult.user?.login,
+          usuarioNomeCompleto: supaResult.user?.nomeCompleto,
+          usuarioCargo: supaResult.user?.cargo,
+        });
+        return;
+      }
+
       const localResult = authenticatePlatformLogin(
         schools,
         cleanLogin,
@@ -146,7 +194,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
         return;
       }
       setErrorMessage(
-        localResult.error ||
+        supaResult.error ||
+          localResult.error ||
           'Credenciais inválidas: verifique seu login e senha.'
       );
     } finally {

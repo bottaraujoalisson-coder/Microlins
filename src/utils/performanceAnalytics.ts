@@ -1004,24 +1004,7 @@ export function resolveRecordProfessor(record: StudentPerformanceRecord): string
   if (record.educador && record.educador.trim()) {
     return record.educador.trim();
   }
-  if (isEnglishFormacao(record.formacao)) {
-    return 'Lucas Almeida';
-  }
-  const cursoUpper = (record.curso || '').toUpperCase();
-  if (
-    cursoUpper.includes('ADMINISTRATIVO') ||
-    cursoUpper.includes('RECURSOS HUMANOS') ||
-    cursoUpper.includes('MARKETING') ||
-    cursoUpper.includes('FARMÁCIA') ||
-    cursoUpper.includes('CONTÁBIL') ||
-    cursoUpper.includes('CONTABIL') ||
-    cursoUpper.includes('FISCAL') ||
-    cursoUpper.includes('LIDERANÇA') ||
-    cursoUpper.includes('VENDAS')
-  ) {
-    return 'Camila Ferreira';
-  }
-  return 'João Silva';
+  return '';
 }
 
 export function extractAvailableEducators(records: EvaluatedStudentRecord[]): string[] {

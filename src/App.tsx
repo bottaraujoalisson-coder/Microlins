@@ -38,7 +38,7 @@ import {
   PORTAL_WEEKDAY_LABEL_TO_CODE,
   StudentPerformanceRecord,
 } from './data/microlinsData';
-import { fetchStudentRecords, fetchNpsInvitations, fetchSchoolsFromSupabase } from './utils/supabaseClient';
+import { supabase, fetchStudentRecords, fetchNpsInvitations, fetchSchoolsFromSupabase } from './utils/supabaseClient';
 import {
   ApostilaFilterType,
   buildSynchronizedNpsStudentCards,
@@ -217,17 +217,11 @@ export default function App() {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   }, []);
 
-  const [records, setRecords] = useState<StudentPerformanceRecord[]>(
-    ALL_WEEK_STUDENT_RECORDS
-  );
+  const [records, setRecords] = useState<StudentPerformanceRecord[]>([]);
   const [activeNpsInvitations, setActiveNpsInvitations] = useState<
     ActiveNpsInvitation[]
-  >(() =>
-    filterAndDeduplicateAnnualNpsInvitations(
-      INITIAL_ACTIVE_NPS_INVITATIONS,
-      getCurrentBrasiliaYear()
-    )
-  );
+  >([]);
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
   const [portalMeta, setPortalMeta] = useState(PORTAL_METADATA);
   const [npsReferenceYear, setNpsReferenceYear] = useState<number>(() =>
     getCurrentBrasiliaYear()
@@ -240,7 +234,7 @@ export default function App() {
   const [enteredSchoolFromAdmin, setEnteredSchoolFromAdmin] =
     useState<boolean>(false);
 
-  // Carregamento assíncrono do Supabase (Substituindo mocks estáticos por chamadas de fetch assíncronas)
+  // Carregamento assíncrono do Supabase
   useEffect(() => {
     let isMounted = true;
     async function loadSupabaseData() {
@@ -265,11 +259,68 @@ export default function App() {
         }
       } catch (err) {
         console.error('Error loading data from Supabase:', err);
+      } finally {
+        if (isMounted) {
+          setIsLoadingData(false);
+        }
       }
     }
     loadSupabaseData();
     return () => {
       isMounted = false;
+    };
+  }, []);
+
+  // Supabase Realtime Subscription (Sincronização automática em tempo real via WebSockets)
+  useEffect(() => {
+    const channel = supabase
+      .channel('microlins-realtime-sync')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'student_records' },
+        async () => {
+          const remoteRecords = await fetchStudentRecords();
+          if (remoteRecords && remoteRecords.length > 0) {
+            setRecords(remoteRecords);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'nps_records' },
+        async () => {
+          const remoteNps = await fetchNpsInvitations();
+          if (remoteNps && remoteNps.length > 0) {
+            setActiveNpsInvitations(
+              filterAndDeduplicateAnnualNpsInvitations(remoteNps, getCurrentBrasiliaYear())
+            );
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'schools' },
+        async () => {
+          const remoteSchools = await fetchSchoolsFromSupabase();
+          if (remoteSchools && remoteSchools.length > 0) {
+            setSchoolsRegistry(remoteSchools);
+          }
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'users' },
+        async () => {
+          const remoteSchools = await fetchSchoolsFromSupabase();
+          if (remoteSchools && remoteSchools.length > 0) {
+            setSchoolsRegistry(remoteSchools);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -600,6 +651,29 @@ export default function App() {
           prev === nextSyncStr ? prev : nextSyncStr
         );
       } else {
+        const [remoteRecords, remoteNps] = await Promise.all([
+          fetchStudentRecords(),
+          fetchNpsInvitations(),
+        ]);
+        if (remoteRecords && remoteRecords.length > 0) {
+          setRecords((prev) =>
+            computeRecordsSignature(prev) ===
+            computeRecordsSignature(remoteRecords)
+              ? prev
+              : remoteRecords
+          );
+        }
+        if (remoteNps && remoteNps.length > 0) {
+          const deduplicatedNps = filterAndDeduplicateAnnualNpsInvitations(
+            remoteNps,
+            getCurrentBrasiliaYear()
+          );
+          setActiveNpsInvitations((prev) =>
+            computeNpsSignature(prev) === computeNpsSignature(deduplicatedNps)
+              ? prev
+              : deduplicatedNps
+          );
+        }
         const nextMinutes = getBrasiliaCurrentMinutes(
           getSimulatedTimeOverrideFromUrl()
         );
@@ -609,6 +683,33 @@ export default function App() {
         setLastSyncTimestamp(formatCurrentBrasiliaSyncTimestamp());
       }
     } catch {
+      try {
+        const [remoteRecords, remoteNps] = await Promise.all([
+          fetchStudentRecords(),
+          fetchNpsInvitations(),
+        ]);
+        if (remoteRecords && remoteRecords.length > 0) {
+          setRecords((prev) =>
+            computeRecordsSignature(prev) ===
+            computeRecordsSignature(remoteRecords)
+              ? prev
+              : remoteRecords
+          );
+        }
+        if (remoteNps && remoteNps.length > 0) {
+          const deduplicatedNps = filterAndDeduplicateAnnualNpsInvitations(
+            remoteNps,
+            getCurrentBrasiliaYear()
+          );
+          setActiveNpsInvitations((prev) =>
+            computeNpsSignature(prev) === computeNpsSignature(deduplicatedNps)
+              ? prev
+              : deduplicatedNps
+          );
+        }
+      } catch {
+        // Ignore network errors
+      }
       const nextMinutes = getBrasiliaCurrentMinutes(
         getSimulatedTimeOverrideFromUrl()
       );
@@ -972,6 +1073,19 @@ export default function App() {
     authSession.nomeCompleto || portalMeta.usuarioNomeCompleto;
   const activeUserRole = authSession.cargo || portalMeta.usuarioCargo;
   const activeUserLogin = authSession.login || portalMeta.usuarioLogin;
+
+  if (isLoadingData) {
+    return (
+      <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-white">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className="h-8 w-8 animate-spin text-sky-400" />
+          <p className="text-xs font-semibold tracking-wider uppercase text-slate-300">
+            Carregando dados da nuvem (Supabase)...
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div
