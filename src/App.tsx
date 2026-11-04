@@ -209,11 +209,18 @@ export default function App() {
     setTheme((prev) => (prev === 'light' ? 'dark' : 'light'));
   }, []);
 
-  const [records, setRecords] = useState<StudentPerformanceRecord[]>([]);
+  const [records, setRecords] = useState<StudentPerformanceRecord[]>(
+    () => ALL_WEEK_STUDENT_RECORDS
+  );
   const [activeNpsInvitations, setActiveNpsInvitations] = useState<
     ActiveNpsInvitation[]
-  >([]);
-  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
+  >(() =>
+    filterAndDeduplicateAnnualNpsInvitations(
+      INITIAL_ACTIVE_NPS_INVITATIONS,
+      getCurrentBrasiliaYear()
+    )
+  );
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(false);
   const [portalMeta, setPortalMeta] = useState(PORTAL_METADATA);
   const [npsReferenceYear, setNpsReferenceYear] = useState<number>(() =>
     getCurrentBrasiliaYear()
@@ -226,23 +233,32 @@ export default function App() {
   const [enteredSchoolFromAdmin, setEnteredSchoolFromAdmin] =
     useState<boolean>(false);
 
-  // Carregamento assíncrono do Supabase
+  // Carregamento assíncrono e atualização em segundo plano via Supabase (com timeout de segurança para nunca travar a aplicação)
   useEffect(() => {
     let isMounted = true;
     async function loadSupabaseData() {
       try {
-        const [remoteRecords, remoteNps, remoteSchools] = await Promise.all([
-          fetchStudentRecords(),
-          fetchNpsInvitations(),
-          fetchSchoolsFromSupabase(),
+        const timeoutPromise = new Promise<null>((resolve) =>
+          setTimeout(() => resolve(null), 4000)
+        );
+        const fetchPromise = Promise.all([
+          fetchStudentRecords().catch(() => []),
+          fetchNpsInvitations().catch(() => []),
+          fetchSchoolsFromSupabase().catch(() => []),
         ]);
+        const result = await Promise.race([fetchPromise, timeoutPromise]);
+        if (!result) return;
+        const [remoteRecords, remoteNps, remoteSchools] = result;
         if (isMounted) {
           if (remoteRecords && remoteRecords.length > 0) {
             setRecords(remoteRecords);
           }
           if (remoteNps && remoteNps.length > 0) {
             setActiveNpsInvitations(
-              filterAndDeduplicateAnnualNpsInvitations(remoteNps, getCurrentBrasiliaYear())
+              filterAndDeduplicateAnnualNpsInvitations(
+                remoteNps,
+                getCurrentBrasiliaYear()
+              )
             );
           }
           if (remoteSchools && remoteSchools.length > 0) {
@@ -1123,7 +1139,7 @@ export default function App() {
   const activeUserRole = authSession.cargo || portalMeta.usuarioCargo;
   const activeUserLogin = authSession.login || portalMeta.usuarioLogin;
 
-  if (isLoadingData) {
+  if (isLoadingData && records.length === 0) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-slate-900 text-white">
         <div className="flex flex-col items-center gap-3">
