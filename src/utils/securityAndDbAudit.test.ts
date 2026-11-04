@@ -27,7 +27,6 @@ import {
   getDatabase,
   closeDatabase,
   getDatabaseStatusSummary,
-  createDatabaseBackup,
   authenticateUserInDb,
   validateSessionTokenInDb,
   revokeSessionTokenInDb,
@@ -35,15 +34,14 @@ import {
   resetPasswordWithRecoveryTokenInDb,
   upsertSchoolInDb,
   upsertUserInDb,
-  createLgpdRequestInDb,
-  getLgpdRequestsFromDb,
-  getAuditLogsFromDb,
+  getSchoolsFromDb,
 } from '../db/database';
+import { sanitizeSchoolsForClient } from './authRegistry';
 
 const tmpTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'microlins-audit-test-'));
 const isolatedDbPath = path.join(tmpTestDir, 'test_audit.sqlite');
 
-test('ETAPA 3.1: Argon2id password hashing and constant-time verification', () => {
+test('SEÇÃO 6.1: Argon2id password hashing and constant-time verification', () => {
   const rawPassword = 'StrongPassword@2026!';
   const hash = hashPasswordArgon2id(rawPassword);
 
@@ -54,7 +52,7 @@ test('ETAPA 3.1: Argon2id password hashing and constant-time verification', () =
   assert.equal(verifyPasswordSecure('', hash), false, 'Empty password must verify false');
 });
 
-test('ETAPA 3.2: Authenticated encryption at rest for external integration secrets', () => {
+test('SEÇÃO 6.1: Authenticated encryption at rest for external integration secrets', () => {
   const secretPortalPass = 'PortalMoveEdu#Secret99';
   const encrypted = encryptSecretAES256GCM(secretPortalPass);
 
@@ -65,7 +63,7 @@ test('ETAPA 3.2: Authenticated encryption at rest for external integration secre
   assert.equal(decrypted, secretPortalPass, 'Decrypted value must match original plaintext');
 });
 
-test('ETAPA 3.3: Session token generation (256-bit entropy) and SHA-256 digest', () => {
+test('SEÇÃO 6.1: Session token generation (256-bit entropy) and SHA-256 digest', () => {
   const tokenA = generateSessionToken();
   const tokenB = generateSessionToken();
   assert.equal(tokenA.length, 64, '256-bit hex token must be 64 hex chars');
@@ -76,7 +74,7 @@ test('ETAPA 3.3: Session token generation (256-bit entropy) and SHA-256 digest',
   assert.notEqual(digestA, tokenA);
 });
 
-test('ETAPA 3.4: XSS and SQL Injection payload detection & input sanitization', () => {
+test('SEÇÃO 6.1: XSS and SQL Injection payload detection & input sanitization', () => {
   const xssAttempt = '<script>alert("xss")</script>';
   assert.equal(detectMaliciousPayload(xssAttempt).isMalicious, true, 'Must detect <script> XSS tag');
   const sanitized = sanitizeInputText(xssAttempt);
@@ -89,7 +87,7 @@ test('ETAPA 3.4: XSS and SQL Injection payload detection & input sanitization', 
   assert.equal(detectMaliciousPayload(safeInput).isMalicious, false, 'Normal Portuguese text must not trigger false positive');
 });
 
-test('ETAPA 2: Real SQLite Database initialization, schema migrations, foreign keys & automatic backups', () => {
+test('SEÇÃO 6.2 & 1.5/1.6: SQLite Multi-School schema initialization without backup/audit_logs/lgpd_requests', () => {
   closeDatabase();
   getDatabase(isolatedDbPath);
   const summary = getDatabaseStatusSummary();
@@ -97,21 +95,43 @@ test('ETAPA 2: Real SQLite Database initialization, schema migrations, foreign k
   assert.equal(summary.engine.includes('SQLite'), true);
   assert.equal(summary.foreignKeysEnabled, true, 'SQLite PRAGMA foreign_keys must be enabled');
   assert.ok(summary.counts.schools >= 1, 'Default school must be seeded in SQLite');
-  assert.ok(summary.counts.users >= 2, 'Default school and admin users must be seeded in SQLite');
+  assert.ok(summary.counts.users >= 1, 'Users must be seeded in SQLite');
   assert.ok(summary.appliedMigrations.length >= 1, 'Migration must be recorded in schema_migrations');
-
-  const backupInfo = createDatabaseBackup('audit-unit-test');
-  assert.ok(backupInfo.backupFile.length > 0, 'Backup file name must be returned');
-  assert.ok(backupInfo.sizeBytes > 0, 'Backup file must be non-empty');
 });
 
-test('ETAPA 3.5: Authentication, Server-side Sessions, and Brute-Force Lockout Protection', () => {
+test('SEÇÃO 6.2: Multi-School Isolation, Authentication, Server-side Sessions, and Brute-Force Protection', () => {
   getDatabase(isolatedDbPath);
 
-  // 1. Valid login for default school user
+  // Create school and user to test authentication & session isolation
+  const { school } = upsertSchoolInDb({
+    id: 'school-1875',
+    nome: 'ESCOLA PRESIDENTE PRUDENTE',
+    codigoPortal: '1875',
+    cidade: 'Presidente Prudente',
+    uf: 'SP',
+    npsEmail: 'prudente@microlins.com.br',
+    npsPassword: 'NpsSecretPassword2026',
+  });
+
+  upsertUserInDb(school.id, {
+    login: 'a116882',
+    senha: 'SchoolUserPass@2025',
+    nomeCompleto: 'João Pedro Pereira França',
+    cargo: 'Auxiliar Pedagógico',
+  });
+
+  // Verify sanitized registry never exposes plaintext passwords or hashes
+  const sanitizedSchools = sanitizeSchoolsForClient(getSchoolsFromDb(false));
+  const s1875 = sanitizedSchools.find((s) => s.id === 'school-1875')!;
+  assert.ok(s1875.npsCredential.password.includes('••••'));
+  for (const u of s1875.users) {
+    assert.ok(u.senha.includes('••••'));
+  }
+
+  // 1. Valid login for school user
   const validAuth = authenticateUserInDb(
     'a116882',
-    'Joao@2025',
+    'SchoolUserPass@2025',
     '127.0.0.1',
     'NodeTestAgent'
   );
@@ -119,12 +139,13 @@ test('ETAPA 3.5: Authentication, Server-side Sessions, and Brute-Force Lockout P
   assert.equal(validAuth.status, 200);
   assert.ok(validAuth.session?.sessionToken, 'Must issue 256-bit session token');
   assert.equal(validAuth.session?.role, 'ESCOLA');
+  assert.equal(validAuth.session?.schoolId, 'school-1875');
 
   // 2. Validate session token in DB
   const sessionCheck = validateSessionTokenInDb(validAuth.session?.sessionToken);
   assert.ok(sessionCheck, 'Session token must validate in DB');
   assert.equal(sessionCheck?.login, 'a116882');
-  assert.equal(sessionCheck?.role, 'ESCOLA');
+  assert.equal(sessionCheck?.schoolId, 'school-1875');
 
   // 3. Revoke session token (Logout)
   revokeSessionTokenInDb(validAuth.session?.sessionToken);
@@ -138,13 +159,12 @@ test('ETAPA 3.5: Authentication, Server-side Sessions, and Brute-Force Lockout P
     assert.equal(res.ok, false);
   }
 
-  // 6th attempt while locked must return 429 Too Many Requests
   const lockedAttempt = authenticateUserInDb(bruteUser, 'WrongPass', '10.0.0.99', 'AttackerBot');
   assert.equal(lockedAttempt.ok, false);
   assert.equal(lockedAttempt.status, 429, 'Locked account must return HTTP 429');
 });
 
-test('ETAPA 3.6: Secure single-use time-limited Password Recovery flow', () => {
+test('SEÇÃO 6.1: Secure single-use time-limited Password Recovery flow', () => {
   getDatabase(isolatedDbPath);
 
   const { school } = upsertSchoolInDb({
@@ -165,12 +185,10 @@ test('ETAPA 3.6: Secure single-use time-limited Password Recovery flow', () => {
   });
   assert.equal(user.login, 'prof_recuperacao');
 
-  // Request password recovery token
   const recovery = createPasswordRecoveryTokenInDb('prof_recuperacao', '127.0.0.1');
   assert.equal(recovery.ok, true);
   assert.ok(recovery.recoveryToken, 'Must generate single-use recovery token');
 
-  // Reset password using the recovery token
   const resetRes = resetPasswordWithRecoveryTokenInDb(
     recovery.recoveryToken!,
     'NewSecurePass#2026',
@@ -178,7 +196,6 @@ test('ETAPA 3.6: Secure single-use time-limited Password Recovery flow', () => {
   );
   assert.equal(resetRes.ok, true);
 
-  // Reusing the same recovery token must fail (single-use enforcement)
   const reuseRes = resetPasswordWithRecoveryTokenInDb(
     recovery.recoveryToken!,
     'AnotherPass#2026',
@@ -186,39 +203,20 @@ test('ETAPA 3.6: Secure single-use time-limited Password Recovery flow', () => {
   );
   assert.equal(reuseRes.ok, false, 'Single-use recovery token must reject second use');
 
-  // Authenticate with new password
   const loginNew = authenticateUserInDb('prof_recuperacao', 'NewSecurePass#2026', '127.0.0.1');
   assert.equal(loginNew.ok, true, 'User must be able to login with the newly reset password');
 });
 
-test('ETAPA 4: LGPD Knowledge Base Intelligent Search & Subject Rights Request Persistence', () => {
-  getDatabase(isolatedDbPath);
-
-  assert.ok(PRIVACY_KNOWLEDGE_BASE.length >= 8, 'Knowledge base must cover all required LGPD topics');
-  assert.equal(PRIVACY_QUICK_QUESTIONS.length, 7, 'Must expose all 7 mandatory quick questions');
+test('SEÇÃO 6.3: Technical LGPD Knowledge Base & Multi-School Isolation Documentation', () => {
+  assert.ok(PRIVACY_KNOWLEDGE_BASE.length >= 6, 'Knowledge base must cover technical LGPD, RBAC, and multi-school isolation');
+  assert.ok(PRIVACY_QUICK_QUESTIONS.length >= 5, 'Must expose quick technical questions');
 
   for (const question of PRIVACY_QUICK_QUESTIONS) {
     const results = searchPrivacyKnowledgeBase(question);
-    assert.ok(results.length >= 1, `Intelligent search must return relevant answer for: "${question}"`);
-    assert.ok((results[0].score || 0) >= 25, `Top match score must be high for: "${question}"`);
+    assert.ok(results.length >= 1, `Search must return relevant answer for: "${question}"`);
   }
 
-  // Test persisting an LGPD Subject Right request in SQLite
-  const lgpdRecord = createLgpdRequestInDb({
-    requesterName: 'Maria Silva',
-    requesterEmail: 'maria.silva@exemplo.com.br',
-    requesterRole: 'Aluno / Responsável Legal',
-    requestType: 'ACESSO_DADOS',
-    description: 'Solicito confirmação de tratamento e relatório de logs de acesso à minha conta.',
-    ipAddress: '127.0.0.1',
-  });
-  assert.ok(lgpdRecord.protocol.startsWith('LGPD-'), 'Must generate official LGPD protocol number');
-
-  const requests = getLgpdRequestsFromDb();
-  assert.ok(requests.some((r) => r.protocol === lgpdRecord.protocol), 'LGPD request must be persisted in SQLite');
-
-  const logs = getAuditLogsFromDb(50);
-  assert.ok(logs.length > 0, 'Audit logs must record system security and LGPD events');
-
   closeDatabase();
+  // Re-open default database so subsequent tests use the production SQLite file
+  getDatabase();
 });

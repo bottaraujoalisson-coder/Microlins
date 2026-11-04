@@ -7,12 +7,9 @@ import {
   CheckCircle2,
   ChevronRight,
   Database,
-  DownloadCloud,
   Eye,
   EyeOff,
   ExternalLink,
-  FileCheck2,
-  HardDrive,
   KeyRound,
   Loader2,
   Lock,
@@ -22,7 +19,6 @@ import {
   RefreshCw,
   Search,
   Shield,
-  ShieldAlert,
   ShieldCheck,
   Trash2,
   UserPlus,
@@ -40,27 +36,12 @@ import {
   checkSupabaseHealth,
   deleteSchoolFromSupabase,
   deleteUserFromSupabase,
-  fetchAuditLogsFromSupabase,
-  fetchLgpdRequestsFromSupabase,
   migrateAllDataToSupabase,
-  recordAuditLogInSupabase,
   toggleUserStatusInSupabase,
   updateUserPasswordInSupabase,
   upsertSchoolInSupabase,
   upsertUserInSupabase,
 } from '../utils/supabaseClient';
-
-interface AuditLogItem {
-  id: number;
-  timestamp: string;
-  actorLogin: string;
-  actorRole: string;
-  action: string;
-  resource: string;
-  status: 'SUCCESS' | 'DENIED' | 'ERROR';
-  ipAddress: string;
-  details: string;
-}
 
 interface DatabaseStatusInfo {
   engine: string;
@@ -69,37 +50,18 @@ interface DatabaseStatusInfo {
   walMode: boolean;
   foreignKeysEnabled: boolean;
   schemaVersion: number;
-  appliedMigrations: Array<{ version: number; name: string; appliedAt: string }>;
   counts: {
     schools: number;
     users: number;
     activeSessions: number;
-    auditLogs: number;
-    lgpdRequests: number;
-    backupsCount: number;
+    studentRecords?: number;
+    npsRecords?: number;
   };
-  backups: Array<{
-    fileName: string;
-    sizeBytes: number;
-    createdAt: string;
-  }>;
   securityAlgorithms: {
     passwordHashing: string;
     integrationSecretsEncryption: string;
     sessionTokenDigest: string;
   };
-}
-
-interface LgpdRequestItem {
-  id: number;
-  protocol: string;
-  requesterName: string;
-  requesterEmail: string;
-  requesterRole: string;
-  requestType: string;
-  description: string;
-  status: string;
-  createdAt: string;
 }
 
 interface AdminPanelViewProps {
@@ -109,19 +71,14 @@ interface AdminPanelViewProps {
   sessionToken?: string;
 }
 
-type AdminSectionTab =
-  | 'escolas'
-  | 'gestao_escola'
-  | 'seguranca_auditoria'
-  | 'banco_lgpd';
+type AdminSectionTab = 'escolas' | 'gestao_escola' | 'seguranca';
 
 type UserSortField =
   | 'nomeCompleto'
   | 'cargo'
   | 'login'
   | 'active'
-  | 'ultimoAcesso'
-  | 'lastTestedAt';
+  | 'ultimoAcesso';
 
 export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   schools,
@@ -167,15 +124,10 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     useState<UserSortField>('nomeCompleto');
   const [userSortOrder, setUserSortOrder] = useState<'asc' | 'desc'>('asc');
 
-  // Auditoria, Banco de Dados SQLite e LGPD
-  const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
-  const [auditFilterStatus, setAuditFilterStatus] = useState<
-    'ALL' | 'SUCCESS' | 'DENIED' | 'ERROR'
-  >('ALL');
+  // Status do Banco e Sincronização
   const [dbStatus, setDbStatus] = useState<DatabaseStatusInfo | null>(null);
-  const [lgpdRequests, setLgpdRequests] = useState<LgpdRequestItem[]>([]);
-  const [isCreatingBackup, setIsCreatingBackup] = useState<boolean>(false);
-  const [isMigratingSupabase, setIsMigratingSupabase] = useState<boolean>(false);
+  const [isMigratingSupabase, setIsMigratingSupabase] =
+    useState<boolean>(false);
 
   // Modais
   const [passwordModalUser, setPasswordModalUser] =
@@ -199,6 +151,12 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     message: string;
   } | null>(null);
 
+  const [adminNewPassword, setAdminNewPassword] = useState<string>('');
+  const [adminConfirmPassword, setAdminConfirmPassword] = useState<string>('');
+  const [showAdminPassword, setShowAdminPassword] = useState<boolean>(false);
+  const [isUpdatingAdminPassword, setIsUpdatingAdminPassword] =
+    useState<boolean>(false);
+
   const buildAdminHeaders = useCallback((): Record<string, string> => {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -209,45 +167,18 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     return headers;
   }, [sessionToken]);
 
-  const fetchGovernanceTelemetry = useCallback(async () => {
+  const fetchDatabaseTelemetry = useCallback(async () => {
     try {
-      const [supaLogs, supaLgpd, supaHealth] = await Promise.all([
-        fetchAuditLogsFromSupabase(120),
-        fetchLgpdRequestsFromSupabase(),
-        checkSupabaseHealth(),
-      ]);
-
-      let logsLoaded = false;
+      const supaHealth = await checkSupabaseHealth();
       let dbLoaded = false;
-      let lgpdLoaded = false;
 
       if (sessionToken) {
         try {
           const headers = buildAdminHeaders();
-          const [logsRes, dbRes, lgpdRes] = await Promise.all([
-            fetch('/api/admin/audit-logs?limit=120', {
-              headers,
-              credentials: 'include',
-            }),
-            fetch('/api/admin/db-status', {
-              headers,
-              credentials: 'include',
-            }),
-            fetch('/api/admin/privacy-requests', {
-              headers,
-              credentials: 'include',
-            }),
-          ]);
-
-          if (logsRes.ok) {
-            const d = await logsRes.json();
-            if (Array.isArray(d.logs) && d.logs.length > 0) {
-              setAuditLogs(
-                supaLogs.length > d.logs.length ? supaLogs : d.logs
-              );
-              logsLoaded = true;
-            }
-          }
+          const dbRes = await fetch('/api/admin/db-status', {
+            headers,
+            credentials: 'include',
+          });
           if (dbRes.ok) {
             const d = await dbRes.json();
             if (d.status) {
@@ -255,51 +186,26 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
               dbLoaded = true;
             }
           }
-          if (lgpdRes.ok) {
-            const d = await lgpdRes.json();
-            if (Array.isArray(d.requests) && d.requests.length > 0) {
-              setLgpdRequests(
-                supaLgpd.length > d.requests.length ? supaLgpd : d.requests
-              );
-              lgpdLoaded = true;
-            }
-          }
         } catch {
-          // Fallback para telemetria direta do Supabase
+          // Fallback para status do Supabase
         }
       }
 
-      if (!logsLoaded && supaLogs.length > 0) {
-        setAuditLogs(supaLogs);
-      }
-      if (!lgpdLoaded && supaLgpd.length > 0) {
-        setLgpdRequests(supaLgpd);
-      }
       if (!dbLoaded && supaHealth.connected) {
         setDbStatus({
-          engine: 'Supabase PostgreSQL Cloud + SQLite ACID',
+          engine: 'Supabase PostgreSQL + SQLite',
           databaseFile: supaHealth.supabaseUrl,
           fileSizeBytes: 524288,
           walMode: true,
           foreignKeysEnabled: true,
-          schemaVersion: 3,
-          appliedMigrations: [
-            {
-              version: 1,
-              name: '001_initial_supabase_schema',
-              appliedAt: new Date().toISOString(),
-            },
-          ],
+          schemaVersion: 4,
           counts: {
             schools: supaHealth.counts.schools ?? schools.length,
             users: supaHealth.counts.users ?? 1,
             activeSessions: 1,
-            auditLogs: supaHealth.counts.auditLogs ?? supaLogs.length,
-            lgpdRequests:
-              supaHealth.counts.lgpdRequests ?? supaLgpd.length,
-            backupsCount: 1,
+            studentRecords: supaHealth.counts.studentRecords ?? 0,
+            npsRecords: supaHealth.counts.npsRecords ?? 0,
           },
-          backups: [],
           securityAlgorithms: {
             passwordHashing: 'Argon2id (RFC 9106)',
             integrationSecretsEncryption: 'AES-256-GCM (NIST SP 800-38D)',
@@ -313,8 +219,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
   }, [buildAdminHeaders, schools.length, sessionToken]);
 
   useEffect(() => {
-    fetchGovernanceTelemetry();
-  }, [fetchGovernanceTelemetry, activeTab, schools.length]);
+    fetchDatabaseTelemetry();
+  }, [fetchDatabaseTelemetry, activeTab, schools.length]);
 
   const selectedSchool =
     schools.find((s) => s.id === selectedSchoolId) || schools[0];
@@ -323,16 +229,18 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     if (selectedSchool) {
       setSelectedSchoolId(selectedSchool.id);
       setNpsEmail(selectedSchool.npsCredential?.email || '');
-      // Não pré-preencher com máscara (Pr••••••••26) para evitar envio acidental de texto mascarado
       setNpsPassword('');
       setSyncedUserData(null);
     }
   }, [selectedSchool?.id]);
 
-  // Indicadores Executivos do Painel ADM
+  // Indicadores Resumidos do Painel ADM
   const totalSchoolsCount = schools.length;
   const activeSchoolsCount = schools.filter(
     (s) => s.active !== false && s.ativa !== false
+  ).length;
+  const schoolsWithNpsCount = schools.filter((s) =>
+    Boolean(s.npsCredential?.email)
   ).length;
   const totalUsersCount = useMemo(
     () => schools.reduce((acc, s) => acc + (s.users?.length || 0), 0),
@@ -374,21 +282,13 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setFeedbackBanner({
         type: 'error',
         title: 'Nome obrigatório',
-        message: 'Informe o nome da unidade escolar para cadastrar.',
+        message: 'Informe o nome da unidade escolar.',
       });
       return;
     }
 
     try {
       const supaRes = await upsertSchoolInSupabase({ nome: cleanName });
-      await recordAuditLogInSupabase({
-        actorLogin: 'admin',
-        actorRole: 'ADMIN',
-        action: 'SCHOOL_CREATED',
-        resource: `schools/${supaRes.school.id}`,
-        status: 'SUCCESS',
-        details: `Unidade "${cleanName}" criada no Supabase.`,
-      });
 
       try {
         const res = await fetch('/api/admin/schools', {
@@ -411,8 +311,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setNewSchoolName('');
       setFeedbackBanner({
         type: 'success',
-        title: 'Unidade escolar cadastrada',
-        message: `A unidade "${cleanName}" foi registrada com sucesso no Supabase.`,
+        title: 'Unidade cadastrada',
+        message: `A unidade "${cleanName}" foi registrada com sucesso.`,
       });
     } catch (err: any) {
       setFeedbackBanner({
@@ -463,13 +363,13 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setFeedbackBanner({
         type: 'success',
         title: 'Nome atualizado',
-        message: `O nome da unidade foi alterado para "${cleanName}".`,
+        message: `Unidade renomeada para "${cleanName}".`,
       });
     } catch {
       setFeedbackBanner({
         type: 'error',
         title: 'Erro ao atualizar',
-        message: 'Não foi possível atualizar o nome da escola.',
+        message: 'Não foi possível atualizar o nome da unidade.',
       });
     }
   };
@@ -482,18 +382,12 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         ? `Ativar Unidade: ${school.nome}`
         : `Desativar Unidade: ${school.nome}`,
       description: nextState
-        ? 'Ao reativar esta unidade, todos os usuários ativos vinculados a ela voltarão a ter acesso imediato à plataforma.'
-        : 'Ao desativar esta unidade, o login de todos os colaboradores vinculados a ela será temporariamente bloqueado.',
+        ? 'Os usuários ativos vinculados a esta unidade voltarão a ter acesso imediato.'
+        : 'O acesso dos colaboradores vinculados a esta unidade será temporariamente bloqueado.',
       impactList: nextState
-        ? [
-            'Liberação imediata do login dos colaboradores ativos da unidade.',
-            'Retomada da sincronização automática com o Portal do Aluno e NPS.',
-          ]
-        : [
-            'Bloqueio imediato de novos logins de colaboradores desta unidade.',
-            'Preservação integral dos dados e histórico no banco de dados.',
-          ],
-      confirmLabel: nextState ? 'Confirmar Ativação' : 'Confirmar Desativação',
+        ? ['Liberação imediata do login dos colaboradores ativos.']
+        : ['Bloqueio temporário de novos logins desta unidade.'],
+      confirmLabel: nextState ? 'Ativar' : 'Desativar',
       isDestructive: !nextState,
       onConfirm: async () => {
         try {
@@ -535,12 +429,11 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     setConfirmationModal({
       title: `Excluir Unidade: ${school.nome}`,
       description:
-        'Esta operação removerá a unidade escolar e todas as credenciais de usuários vinculadas a ela.',
+        'Esta operação removerá a unidade escolar e as credenciais vinculadas a ela.',
       impactList: [
-        `Remoção de ${school.users?.length || 0} usuário(s) vinculado(s) à unidade.`,
-        'Registro permanente da exclusão na trilha de auditoria de segurança.',
+        `Remoção de ${school.users?.length || 0} usuário(s) vinculado(s).`,
       ],
-      confirmLabel: 'Excluir Unidade Permanentemente',
+      confirmLabel: 'Excluir',
       isDestructive: true,
       onConfirm: async () => {
         try {
@@ -577,7 +470,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setFeedbackBanner({
         type: 'error',
         title: 'E-mail obrigatório',
-        message: 'Informe o e-mail da conta Indecx NPS da unidade.',
+        message: 'Informe o e-mail da conta Indecx NPS.',
       });
       return;
     }
@@ -605,23 +498,23 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         setNpsPassword('');
         setFeedbackBanner({
           type: 'success',
-          title: 'Credencial NPS Validada e Salva',
+          title: 'Credencial NPS salva',
           message: data.npsTest.message,
         });
       } else {
         setFeedbackBanner({
           type: 'error',
-          title: 'Falha na validação Indecx NPS',
+          title: 'Falha na validação NPS',
           message:
             data.npsTest?.message ||
-            'Não foi possível validar a credencial NPS. Verifique o e-mail e a senha.',
+            'Verifique o e-mail e a senha informados.',
         });
       }
     } catch {
       setFeedbackBanner({
         type: 'error',
         title: 'Erro de comunicação',
-        message: 'Falha ao testar credencial do NPS.',
+        message: 'Não foi possível testar a credencial NPS.',
       });
     } finally {
       setIsTestingNps(false);
@@ -636,8 +529,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setFeedbackBanner({
         type: 'error',
         title: 'Campos obrigatórios',
-        message:
-          'Informe o login e a senha da escola (Portal do Aluno) para sincronizar e salvar.',
+        message: 'Informe o login e a senha do colaborador.',
       });
       return;
     }
@@ -667,15 +559,15 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           setSyncedUserData(null);
           setFeedbackBanner({
             type: 'success',
-            title: 'Credencial da Escola Sincronizada e Salva',
-            message: `Colaborador "${data.data.nomeCompleto}" (${data.data.cargo}) validado no Portal MoveEdu e liberado para acesso imediato com o login "${cleanLogin}".`,
+            title: 'Credencial sincronizada e salva',
+            message: `${data.data.nomeCompleto} (${data.data.cargo}) liberado com o login "${cleanLogin}".`,
           });
         } else {
           setSyncedUserData(data.data);
           setFeedbackBanner({
             type: 'info',
-            title: 'Dados extraídos do Portal MoveEdu',
-            message: `Colaborador identificado: ${data.data.nomeCompleto} (${data.data.cargo}). Confirme abaixo para concluir o cadastro.`,
+            title: 'Dados identificados',
+            message: `${data.data.nomeCompleto} (${data.data.cargo}). Confirme abaixo para concluir.`,
           });
         }
       } else {
@@ -688,10 +580,10 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         });
         setFeedbackBanner({
           type: 'info',
-          title: 'Cadastro Manual Assistido',
+          title: 'Confirmar dados',
           message:
             data?.error ||
-            'Verifique o nome e cargo abaixo e clique em Confirmar para salvar a credencial.',
+            'Verifique o nome e cargo abaixo e clique em Confirmar.',
         });
       }
     } catch {
@@ -756,15 +648,14 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setSyncedUserData(null);
       setFeedbackBanner({
         type: 'success',
-        title: 'Credencial da Escola Salva',
-        message: `O colaborador "${syncedUserData.nomeCompleto}" foi salvo no Supabase e já pode acessar o sistema.`,
+        title: 'Credencial salva',
+        message: `O colaborador "${syncedUserData.nomeCompleto}" já pode acessar o sistema.`,
       });
     } catch (err: any) {
       setFeedbackBanner({
         type: 'error',
         title: 'Falha ao salvar',
-        message:
-          err?.message || 'Não foi possível salvar o usuário no banco de dados.',
+        message: err?.message || 'Não foi possível salvar o usuário.',
       });
     }
   };
@@ -777,21 +668,22 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       if (res.success) {
         setFeedbackBanner({
           type: 'success',
-          title: 'Migração para o Supabase Concluída',
+          title: 'Sincronização concluída',
           message: res.message,
         });
+        fetchDatabaseTelemetry();
       } else {
         setFeedbackBanner({
           type: 'error',
-          title: 'Erro na Migração',
+          title: 'Erro na sincronização',
           message: res.message,
         });
       }
     } catch (err: any) {
       setFeedbackBanner({
         type: 'error',
-        title: 'Falha na Migração',
-        message: err?.message || 'Erro inesperado ao conectar com o Supabase.',
+        title: 'Falha na sincronização',
+        message: err?.message || 'Erro ao conectar com o Supabase.',
       });
     } finally {
       setIsMigratingSupabase(false);
@@ -821,16 +713,16 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       if (data.portalTest?.ok) {
         setFeedbackBanner({
           type: 'success',
-          title: 'Credencial Validada no Portal MoveEdu',
+          title: 'Credencial validada',
           message: `${user.nomeCompleto} (#${user.login}): ${data.portalTest.message}`,
         });
       } else {
         setFeedbackBanner({
           type: 'error',
-          title: 'Atenção na validação da credencial',
+          title: 'Falha na validação',
           message:
             data.portalTest?.message ||
-            'Não foi possível validar a senha armazenada no Portal MoveEdu.',
+            'Não foi possível validar a credencial no Portal MoveEdu.',
         });
       }
     } catch {
@@ -850,7 +742,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     if (newPassword.trim().length < 4) {
       setFeedbackBanner({
         type: 'error',
-        title: 'Senha muito curta',
+        title: 'Senha curta',
         message: 'A nova senha deve conter pelo menos 4 caracteres.',
       });
       return;
@@ -859,7 +751,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setFeedbackBanner({
         type: 'error',
         title: 'Senhas divergentes',
-        message: 'A confirmação de senha não coincide com a nova senha.',
+        message: 'A confirmação não coincide com a nova senha.',
       });
       return;
     }
@@ -894,14 +786,14 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       setConfirmPassword('');
       setFeedbackBanner({
         type: 'success',
-        title: 'Senha da credencial atualizada',
-        message: `A senha do colaborador "${passwordModalUser.nomeCompleto}" (#${passwordModalUser.login}) foi atualizada no Supabase e desbloqueada.`,
+        title: 'Senha atualizada',
+        message: `Senha de "${passwordModalUser.nomeCompleto}" (#${passwordModalUser.login}) atualizada.`,
       });
     } catch {
       setFeedbackBanner({
         type: 'error',
         title: 'Erro ao alterar senha',
-        message: 'Não foi possível atualizar a senha do usuário.',
+        message: 'Não foi possível atualizar a senha.',
       });
     }
   };
@@ -928,7 +820,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           return;
         }
       } catch {
-        // Usa retorno do Supabase
+        // Fallback Supabase
       }
       onSchoolsChange(supaSchools);
     } catch {
@@ -940,12 +832,9 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     if (!selectedSchool) return;
     setConfirmationModal({
       title: `Remover Usuário: ${user.nomeCompleto}`,
-      description: `Tem certeza de que deseja revogar e excluir permanentemente a credencial "${user.login}" da unidade ${selectedSchool.nome}?`,
-      impactList: [
-        'Revogação imediata do acesso do colaborador à plataforma.',
-        'Registro da operação na trilha de auditoria do sistema.',
-      ],
-      confirmLabel: 'Confirmar Exclusão',
+      description: `Deseja excluir a credencial "${user.login}" da unidade ${selectedSchool.nome}?`,
+      impactList: ['Revogação imediata do acesso do colaborador.'],
+      confirmLabel: 'Excluir',
       isDestructive: true,
       onConfirm: async () => {
         try {
@@ -978,32 +867,57 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     });
   };
 
-  const handleTriggerManualBackup = async () => {
-    setIsCreatingBackup(true);
+  const handleUpdateAdminMasterPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanNew = adminNewPassword.trim();
+    if (cleanNew.length < 6) {
+      setFeedbackBanner({
+        type: 'error',
+        title: 'Senha curta',
+        message: 'A nova senha deve conter no mínimo 6 caracteres.',
+      });
+      return;
+    }
+    if (cleanNew !== adminConfirmPassword.trim()) {
+      setFeedbackBanner({
+        type: 'error',
+        title: 'Senhas divergentes',
+        message: 'A confirmação não coincide com a nova senha.',
+      });
+      return;
+    }
+    setIsUpdatingAdminPassword(true);
     try {
-      const res = await fetch('/api/admin/db-backup', {
+      const res = await fetch('/api/admin/change-admin-password', {
         method: 'POST',
         headers: buildAdminHeaders(),
         credentials: 'include',
+        body: JSON.stringify({ novaSenha: cleanNew }),
       });
       const data = await res.json();
-      if (res.ok && data.ok) {
-        if (data.status) setDbStatus(data.status);
+      if (res.ok && data?.ok) {
+        setAdminNewPassword('');
+        setAdminConfirmPassword('');
         setFeedbackBanner({
           type: 'success',
-          title: 'Backup Gerado com Sucesso',
-          message: `Snapshot salvo em .data/backups/${data.backup?.backupFile} (${data.backup?.sizeBytes} bytes).`,
+          title: 'Senha do administrador atualizada',
+          message: 'Nova senha armazenada com hash Argon2id no banco de dados.',
         });
-        fetchGovernanceTelemetry();
+      } else {
+        setFeedbackBanner({
+          type: 'error',
+          title: 'Falha ao atualizar senha',
+          message: data?.error || 'Não foi possível salvar a nova senha.',
+        });
       }
     } catch {
       setFeedbackBanner({
         type: 'error',
-        title: 'Falha no Backup',
-        message: 'Não foi possível criar o snapshot do banco no momento.',
+        title: 'Erro de comunicação',
+        message: 'Falha ao contatar o servidor.',
       });
     } finally {
-      setIsCreatingBackup(false);
+      setIsUpdatingAdminPassword(false);
     }
   };
 
@@ -1042,11 +956,6 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
     userSortOrder,
   ]);
 
-  const filteredAuditLogs = useMemo(() => {
-    if (auditFilterStatus === 'ALL') return auditLogs;
-    return auditLogs.filter((l) => l.status === auditFilterStatus);
-  }, [auditLogs, auditFilterStatus]);
-
   const toggleSort = (field: UserSortField) => {
     if (userSortField === field) {
       setUserSortOrder((prev) => (prev === 'asc' ? 'desc' : 'asc'));
@@ -1064,17 +973,17 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
       className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-slate-100 px-3 py-2.5 sm:px-5 dark:bg-slate-950"
     >
       <div className="mx-auto w-full max-w-7xl space-y-2.5">
-        {/* FAIXA SUPERIOR DE INDICADORES EXECUTIVOS PADRONIZADOS EM 2 LINHAS (2x2 COMPACTO) */}
+        {/* RESUMO EXECUTIVO ENXUTO (3 CARDS) */}
         <section
-          aria-label="Indicadores executivos do painel administrativo"
+          aria-label="Resumo do painel administrativo"
           data-testid="admin-summary-cards-grid"
-          className="grid grid-cols-2 gap-1.5"
+          className="grid grid-cols-1 gap-1.5 sm:grid-cols-3"
         >
-          <div className="flex h-9 items-center justify-between rounded-lg border border-slate-200 bg-white px-3 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200 bg-white px-3.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center gap-2">
-              <Building2 className="h-3.5 w-3.5 text-[#004A8D] dark:text-sky-400" />
+              <Building2 className="h-4 w-4 text-[#004A8D] dark:text-sky-400" />
               <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                Unidades Escolares
+                Unidades
               </span>
             </div>
             <span className="text-xs font-black tabular-nums text-slate-900 dark:text-white">
@@ -1085,11 +994,11 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             </span>
           </div>
 
-          <div className="flex h-9 items-center justify-between rounded-lg border border-slate-200 bg-white px-3 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200 bg-white px-3.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center gap-2">
-              <Users className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+              <Users className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
               <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                Credenciais Escolares
+                Credenciais
               </span>
             </div>
             <span className="text-xs font-black tabular-nums text-emerald-700 dark:text-emerald-400">
@@ -1100,45 +1009,30 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             </span>
           </div>
 
-          <div className="flex h-9 items-center justify-between rounded-lg border border-slate-200 bg-white px-3 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+          <div className="flex h-10 items-center justify-between rounded-lg border border-slate-200 bg-white px-3.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
             <div className="flex items-center gap-2">
-              <Database className="h-3.5 w-3.5 text-[#004A8D] dark:text-sky-400" />
+              <ShieldCheck className="h-4 w-4 text-[#004A8D] dark:text-sky-400" />
               <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                Banco de Dados
+                Contas NPS
               </span>
             </div>
-            <span className="text-xs font-black text-slate-900 dark:text-white">
-              SQLite ·{' '}
+            <span className="text-xs font-black tabular-nums text-slate-900 dark:text-white">
+              {schoolsWithNpsCount}{' '}
               <span className="font-medium text-slate-500">
-                {dbStatus?.counts.backupsCount ?? 1} backup(s)
-              </span>
-            </span>
-          </div>
-
-          <div className="flex h-9 items-center justify-between rounded-lg border border-slate-200 bg-white px-3 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-            <div className="flex items-center gap-2">
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-              <span className="text-xs font-bold text-slate-700 dark:text-slate-200">
-                Segurança & LGPD
-              </span>
-            </div>
-            <span className="text-xs font-black text-emerald-700 dark:text-emerald-400">
-              Ativa ·{' '}
-              <span className="font-medium text-slate-500">
-                {dbStatus?.counts.auditLogs ?? auditLogs.length} eventos
+                / {totalSchoolsCount} conectadas
               </span>
             </span>
           </div>
         </section>
 
-        {/* BARRA DE NAVEGAÇÃO COMPACTA ENTRE OS 4 MÓDULOS DO PAINEL ADMINISTRATIVO */}
+        {/* BARRA DE NAVEGAÇÃO */}
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
           <div className="flex flex-wrap items-center gap-1">
             <button
               type="button"
               data-testid="admin-tab-escolas"
               onClick={() => setActiveTab('escolas')}
-              className={`inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
+              className={`inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
                 activeTab === 'escolas'
                   ? 'bg-[#004A8D] text-white shadow-2xs'
                   : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'
@@ -1152,7 +1046,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
               type="button"
               data-testid="admin-tab-gestao-escola"
               onClick={() => setActiveTab('gestao_escola')}
-              className={`inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
+              className={`inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
                 activeTab === 'gestao_escola'
                   ? 'bg-[#004A8D] text-white shadow-2xs'
                   : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'
@@ -1167,29 +1061,15 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             <button
               type="button"
               data-testid="admin-tab-seguranca"
-              onClick={() => setActiveTab('seguranca_auditoria')}
-              className={`inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
-                activeTab === 'seguranca_auditoria'
+              onClick={() => setActiveTab('seguranca')}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
+                activeTab === 'seguranca'
                   ? 'bg-[#004A8D] text-white shadow-2xs'
                   : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'
               }`}
             >
               <Shield className="h-3.5 w-3.5" />
-              <span>Segurança e Auditoria</span>
-            </button>
-
-            <button
-              type="button"
-              data-testid="admin-tab-banco-lgpd"
-              onClick={() => setActiveTab('banco_lgpd')}
-              className={`inline-flex h-7 items-center gap-1.5 rounded-md px-3 text-xs font-bold transition-all ${
-                activeTab === 'banco_lgpd'
-                  ? 'bg-[#004A8D] text-white shadow-xs'
-                  : 'text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800'
-              }`}
-            >
-              <Database className="h-4 w-4" />
-              <span>Banco de Dados e LGPD</span>
+              <span>Segurança e Banco</span>
             </button>
           </div>
 
@@ -1211,10 +1091,10 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                   sessionToken,
                 });
               }}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 text-xs font-bold text-white shadow-2xs transition-colors hover:bg-emerald-700"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-bold text-white shadow-2xs transition-colors hover:bg-emerald-700"
             >
               <ExternalLink className="h-3.5 w-3.5" />
-              <span>Acessar Painel de {selectedSchool.nome}</span>
+              <span>Acessar {selectedSchool.nome}</span>
             </button>
           )}
         </div>
@@ -1227,8 +1107,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
               feedbackBanner.type === 'success'
                 ? 'border-emerald-300 bg-emerald-50 text-emerald-950 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-200'
                 : feedbackBanner.type === 'error'
-                  ? 'border-rose-300 bg-rose-50 text-rose-950 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-200'
-                  : 'border-sky-300 bg-sky-50 text-sky-950 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200'
+                ? 'border-rose-300 bg-rose-50 text-rose-950 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-200'
+                : 'border-sky-300 bg-sky-50 text-sky-950 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-200'
             }`}
           >
             <div className="flex items-start gap-2.5">
@@ -1256,54 +1136,41 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           </div>
         )}
 
-        {/* =====================================================================
-            ABA 1: UNIDADES ESCOLARES CADASTRADAS
-           ===================================================================== */}
+        {/* ABA 1: UNIDADES ESCOLARES */}
         {activeTab === 'escolas' && (
           <div className="space-y-4">
-            {/* Card de Cadastro Rápido de Unidade */}
-            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-              <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                Cadastrar Nova Unidade Escolar
-              </h2>
-              <p className="mt-0.5 text-xs text-slate-500">
-                Adicione uma nova unidade para configurar suas credenciais do Portal do Aluno e do Indecx NPS.
-              </p>
-
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
               <form
                 onSubmit={handleCreateSchool}
-                className="mt-3.5 flex flex-col gap-2.5 sm:flex-row"
+                className="flex flex-col gap-2.5 sm:flex-row sm:items-center"
               >
+                <span className="shrink-0 text-xs font-bold text-slate-800 dark:text-white">
+                  Nova Unidade:
+                </span>
                 <input
                   type="text"
                   data-testid="new-school-name-input"
                   value={newSchoolName}
                   onChange={(e) => setNewSchoolName(e.target.value)}
-                  placeholder="Ex.: ESCOLA MARÍLIA ou ESCOLA BAURU"
+                  placeholder="Nome da unidade (ex.: ESCOLA MARÍLIA)"
                   className="h-9 flex-1 rounded-lg border border-slate-300 bg-white px-3.5 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                 />
                 <button
                   type="submit"
                   data-testid="create-school-submit-btn"
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-[#004A8D] px-4 text-xs font-bold text-white shadow-xs transition-colors hover:bg-[#003B70]"
+                  className="inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-[#004A8D] px-4 text-xs font-bold text-white shadow-xs transition-colors hover:bg-[#003B70]"
                 >
                   <Plus className="h-4 w-4" />
-                  <span>Cadastrar Escola</span>
+                  <span>Cadastrar</span>
                 </button>
               </form>
             </div>
 
-            {/* Tabela de Unidades Escolares */}
-            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
               <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                <div>
-                  <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Unidades Escolares ({filteredSchools.length})
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Selecione uma unidade para gerenciar seus usuários da escola e credenciais NPS.
-                  </p>
-                </div>
+                <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Unidades Cadastradas ({filteredSchools.length})
+                </h2>
 
                 <div className="relative w-full sm:w-72">
                   <Search className="pointer-events-none absolute left-3 top-2.5 h-4 w-4 text-slate-400" />
@@ -1311,23 +1178,23 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                     type="search"
                     value={schoolSearchQuery}
                     onChange={(e) => setSchoolSearchQuery(e.target.value)}
-                    placeholder="Buscar unidade ou e-mail NPS..."
-                    className="h-9 w-full rounded-lg border border-slate-300 bg-slate-50 pl-9 pr-3 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                    placeholder="Buscar unidade..."
+                    className="h-9 w-full rounded-lg border border-slate-300 bg-slate-50 pl-9 pr-3 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:bg-slate-800"
                   />
                 </div>
               </div>
 
-              <div className="mt-4 overflow-x-auto">
+              <div className="mt-3 overflow-x-auto">
                 <table
                   data-testid="schools-registry-table"
                   className="w-full border-collapse text-left text-xs"
                 >
                   <thead>
                     <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-400">
-                      <th className="px-3.5 py-2.5">Unidade Escolar</th>
+                      <th className="px-3.5 py-2.5">Unidade</th>
                       <th className="px-3.5 py-2.5">Status</th>
-                      <th className="px-3.5 py-2.5">Credencial NPS (Indecx)</th>
-                      <th className="px-3.5 py-2.5">Credenciais da Escola</th>
+                      <th className="px-3.5 py-2.5">Conta NPS</th>
+                      <th className="px-3.5 py-2.5">Usuários</th>
                       <th className="px-3.5 py-2.5 text-right">Ações</th>
                     </tr>
                   </thead>
@@ -1352,7 +1219,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                                   {school.nome}
                                 </p>
                                 <p className="text-[11px] text-slate-500">
-                                  Código Portal: #{school.codigoPortal || '1875'}
+                                  Código: #{school.codigoPortal || '1875'}
                                 </p>
                               </div>
                             </div>
@@ -1379,15 +1246,10 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
 
                           <td className="px-3.5 py-3">
                             {hasNps ? (
-                              <div className="flex flex-col gap-0.5">
-                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200">
-                                  <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
-                                  <span>{school.npsCredential.email}</span>
-                                </span>
-                                <span className="text-[11px] text-emerald-700 dark:text-emerald-400">
-                                  Conectado e criptografado
-                                </span>
-                              </div>
+                              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-slate-800 dark:text-slate-200">
+                                <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" />
+                                <span>{school.npsCredential.email}</span>
+                              </span>
                             ) : (
                               <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-semibold text-amber-700 dark:bg-amber-950/60 dark:text-amber-300">
                                 Não configurado
@@ -1398,9 +1260,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                           <td className="px-3.5 py-3">
                             <span className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1 text-xs font-bold text-slate-800 dark:bg-slate-800 dark:text-slate-200">
                               <Users className="h-3.5 w-3.5 text-[#004A8D] dark:text-sky-400" />
-                              <span>
-                                {(school.users || []).length} colaborador(es)
-                              </span>
+                              <span>{(school.users || []).length}</span>
                             </span>
                           </td>
 
@@ -1463,25 +1323,19 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           </div>
         )}
 
-        {/* =====================================================================
-            ABA 2: GESTÃO DA UNIDADE SELECIONADA (NPS + CREDENCIAIS DA ESCOLA)
-           ===================================================================== */}
+        {/* ABA 2: CREDENCIAIS E NPS DA UNIDADE */}
         {activeTab === 'gestao_escola' && selectedSchool && (
           <div className="space-y-4">
-            {/* Seletor Rápido de Unidade */}
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
               <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#004A8D] text-white">
-                  <Building2 className="h-5 w-5" />
+                <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-[#004A8D] text-white">
+                  <Building2 className="h-4 w-4" />
                 </div>
                 <div>
-                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                    Unidade Selecionada
-                  </p>
-                  <h2 className="text-base font-bold text-slate-900 dark:text-white">
+                  <h2 className="text-sm font-bold text-slate-900 dark:text-white">
                     {selectedSchool.nome}{' '}
                     <span className="text-xs font-medium text-slate-500">
-                      (Portal #{selectedSchool.codigoPortal || '1875'})
+                      (#{selectedSchool.codigoPortal || '1875'})
                     </span>
                   </h2>
                 </div>
@@ -1492,13 +1346,13 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                   htmlFor="admin-school-selector"
                   className="text-xs font-semibold text-slate-600 dark:text-slate-300"
                 >
-                  Alternar Unidade:
+                  Unidade:
                 </label>
                 <select
                   id="admin-school-selector"
                   value={selectedSchool.id}
                   onChange={(e) => setSelectedSchoolId(e.target.value)}
-                  className="h-9 rounded-lg border border-slate-300 bg-slate-50 px-3 text-xs font-bold text-slate-900 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                  className="h-8 rounded-lg border border-slate-300 bg-slate-50 px-3 text-xs font-bold text-slate-900 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                 >
                   {schools.map((s) => (
                     <option key={s.id} value={s.id}>
@@ -1510,29 +1364,22 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             </div>
 
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-              {/* Coluna Esquerda (5 cols): Credencial da Escola (Portal MoveEdu) + Credencial NPS Indecx */}
+              {/* Coluna Esquerda: Cadastro de Credencial e Conta NPS */}
               <div className="space-y-4 lg:col-span-5">
-                {/* 1. Credencial da Escola (Portal do Aluno MoveEdu) */}
-                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <UserPlus className="h-4 w-4 text-[#004A8D] dark:text-sky-400" />
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                        Credencial da Escola (Portal do Aluno)
+                        Adicionar Credencial (Portal MoveEdu)
                       </h3>
                     </div>
-                    <span className="rounded-md bg-sky-50 px-2 py-0.5 text-[11px] font-bold text-[#004A8D] dark:bg-sky-950/60 dark:text-sky-300">
-                      MoveEdu
-                    </span>
                   </div>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Informe o login e a senha do colaborador no Portal do Aluno para validar e liberar o acesso à unidade.
-                  </p>
 
-                  <div className="mt-3.5 space-y-3">
+                  <div className="mt-3 space-y-3">
                     <div>
                       <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                        Login da Escola (Portal do Aluno)
+                        Login
                       </label>
                       <input
                         type="text"
@@ -1546,7 +1393,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
 
                     <div>
                       <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                        Senha da Escola (Portal do Aluno)
+                        Senha
                       </label>
                       <div className="relative">
                         <input
@@ -1554,7 +1401,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                           data-testid="portal-user-password-input"
                           value={portalSenha}
                           onChange={(e) => setPortalSenha(e.target.value)}
-                          placeholder="Digite a senha do colaborador"
+                          placeholder="Senha do colaborador"
                           className="h-9 w-full rounded-lg border border-slate-300 bg-white pr-9 pl-3 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                         />
                         <button
@@ -1581,21 +1428,18 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                       {isSyncingPortalUser ? (
                         <>
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          <span>Validando no Portal MoveEdu...</span>
+                          <span>Validando...</span>
                         </>
                       ) : (
                         <>
                           <RefreshCw className="h-3.5 w-3.5" />
-                          <span>Sincronizar e Salvar Credencial</span>
+                          <span>Sincronizar e Salvar</span>
                         </>
                       )}
                     </button>
 
                     {syncedUserData && (
                       <div className="mt-3 space-y-2.5 rounded-xl border border-emerald-300 bg-emerald-50/70 p-3.5 dark:border-emerald-800 dark:bg-emerald-950/40">
-                        <p className="text-xs font-bold text-emerald-950 dark:text-emerald-200">
-                          Confirmar Dados do Colaborador
-                        </p>
                         <div>
                           <label className="mb-0.5 block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
                             Nome Completo
@@ -1614,7 +1458,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                         </div>
                         <div>
                           <label className="mb-0.5 block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
-                            Cargo / Função
+                            Cargo
                           </label>
                           <input
                             type="text"
@@ -1635,20 +1479,19 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                           className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 text-xs font-bold text-white hover:bg-emerald-700"
                         >
                           <CheckCircle2 className="h-4 w-4" />
-                          <span>Confirmar e Salvar Credencial</span>
+                          <span>Confirmar e Salvar</span>
                         </button>
                       </div>
                     )}
                   </div>
                 </div>
 
-                {/* 2. Credencial NPS Indecx */}
-                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <Lock className="h-4 w-4 text-[#004A8D] dark:text-sky-400" />
                       <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                        Credencial do NPS (Indecx)
+                        Conta NPS (Indecx)
                       </h3>
                     </div>
                     <span
@@ -1661,14 +1504,14 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                       {hasConfiguredNps ? 'Conectado' : 'Pendente'}
                     </span>
                   </div>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Credencial institucional para sincronização automática das pesquisas de satisfação NPS da unidade.
-                  </p>
 
-                  <form onSubmit={handleSaveAndTestNps} className="mt-3.5 space-y-3">
+                  <form
+                    onSubmit={handleSaveAndTestNps}
+                    className="mt-3 space-y-3"
+                  >
                     <div>
                       <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                        E-mail da Conta Indecx NPS
+                        E-mail
                       </label>
                       <input
                         type="email"
@@ -1681,16 +1524,9 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                     </div>
 
                     <div>
-                      <div className="mb-1 flex items-center justify-between">
-                        <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-                          Senha do NPS Indecx
-                        </label>
-                        {hasConfiguredNps && !npsPassword && (
-                          <span className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
-                            Senha já salva no cofre
-                          </span>
-                        )}
-                      </div>
+                      <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
+                        Senha
+                      </label>
                       <div className="relative">
                         <input
                           type={showNpsPassword ? 'text' : 'password'}
@@ -1699,8 +1535,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                           onChange={(e) => setNpsPassword(e.target.value)}
                           placeholder={
                             hasConfiguredNps
-                              ? 'Deixe em branco para manter a senha atual ou digite nova'
-                              : 'Digite a senha do Indecx'
+                              ? 'Manter senha atual ou digitar nova'
+                              : 'Senha do Indecx'
                           }
                           className="h-9 w-full rounded-lg border border-slate-300 bg-white pr-9 pl-3 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
                         />
@@ -1727,12 +1563,12 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                       {isTestingNps ? (
                         <>
                           <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                          <span>Validando conexão no Indecx...</span>
+                          <span>Validando...</span>
                         </>
                       ) : (
                         <>
                           <ShieldCheck className="h-3.5 w-3.5" />
-                          <span>Testar e Salvar Credencial NPS</span>
+                          <span>Salvar Conta NPS</span>
                         </>
                       )}
                     </button>
@@ -1740,19 +1576,13 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                 </div>
               </div>
 
-              {/* Coluna Direita (7 cols): Lista de Credenciais da Escola */}
+              {/* Coluna Direita: Tabela de Usuários da Escola */}
               <div className="lg:col-span-7">
-                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+                <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
                   <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
-                    <div>
-                      <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                        Credenciais da Escola Autorizadas (
-                        {filteredAndSortedUsers.length})
-                      </h3>
-                      <p className="text-xs text-slate-500">
-                        Colaboradores vinculados à unidade com acesso liberado ao sistema.
-                      </p>
-                    </div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      Usuários Autorizados ({filteredAndSortedUsers.length})
+                    </h3>
 
                     <div className="flex flex-wrap items-center gap-2">
                       <div className="relative">
@@ -1761,8 +1591,8 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                           type="search"
                           value={userSearchQuery}
                           onChange={(e) => setUserSearchQuery(e.target.value)}
-                          placeholder="Filtrar por nome ou login..."
-                          className="h-8 rounded-lg border border-slate-300 bg-slate-50 pl-8 pr-2.5 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white"
+                          placeholder="Buscar nome ou login..."
+                          className="h-8 rounded-lg border border-slate-300 bg-slate-50 pl-8 pr-2.5 text-xs font-medium text-slate-900 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-white dark:focus:bg-slate-800"
                         />
                       </div>
 
@@ -1775,14 +1605,14 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                         }
                         className="h-8 rounded-lg border border-slate-300 bg-slate-50 px-2 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
                       >
-                        <option value="ALL">Status: Todos</option>
-                        <option value="ACTIVE">Apenas Ativos</option>
-                        <option value="INACTIVE">Apenas Inativos</option>
+                        <option value="ALL">Todos</option>
+                        <option value="ACTIVE">Ativos</option>
+                        <option value="INACTIVE">Inativos</option>
                       </select>
                     </div>
                   </div>
 
-                  <div className="mt-4 overflow-x-auto">
+                  <div className="mt-3 overflow-x-auto">
                     <table
                       data-testid="school-users-table"
                       className="w-full border-collapse text-left text-xs"
@@ -1799,7 +1629,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                               <ArrowUpDown className="h-3 w-3" />
                             </button>
                           </th>
-                          <th className="px-3 py-2.5">Login da Escola</th>
+                          <th className="px-3 py-2.5">Login</th>
                           <th className="px-3 py-2.5">Status</th>
                           <th className="px-3 py-2.5 text-right">Ações</th>
                         </tr>
@@ -1820,7 +1650,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                                   {user.nomeCompleto}
                                 </p>
                                 <p className="text-[11px] text-slate-500">
-                                  {user.cargo} · Último acesso:{' '}
+                                  {user.cargo} · Acesso:{' '}
                                   {formatUserAccessDateTime(user.ultimoAcesso)}
                                 </p>
                               </td>
@@ -1829,9 +1659,6 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                                 <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-0.5 font-mono text-xs font-bold text-[#004A8D] dark:bg-slate-800 dark:text-sky-400">
                                   {user.login}
                                 </span>
-                                <p className="mt-0.5 text-[11px] text-emerald-700 dark:text-emerald-400">
-                                  Credencial sincronizada
-                                </p>
                               </td>
 
                               <td className="px-3 py-3">
@@ -1860,7 +1687,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                                     data-testid={`retest-user-btn-${user.login}`}
                                     onClick={() => handleRetestExistingUser(user)}
                                     disabled={isRetesting}
-                                    title="Validar credencial no Portal do Aluno"
+                                    title="Validar credencial no Portal"
                                     className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
                                   >
                                     <RefreshCw
@@ -1878,7 +1705,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                                       setNewPassword('');
                                       setConfirmPassword('');
                                     }}
-                                    title="Atualizar senha da credencial"
+                                    title="Atualizar senha"
                                     className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
                                   >
                                     <KeyRound className="h-3 w-3" />
@@ -1920,175 +1747,90 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
           </div>
         )}
 
-        {/* =====================================================================
-            ABA 3: SEGURANÇA DA INFORMAÇÃO E TRILHA DE AUDITORIA (AUDIT LOGS)
-           ===================================================================== */}
-        {activeTab === 'seguranca_auditoria' && (
+        {/* ABA 3: SEGURANÇA E BANCO DE DADOS */}
+        {activeTab === 'seguranca' && (
           <div
             data-testid="admin-security-audit-section"
             className="space-y-4"
           >
-            {/* Resumo de Controles de Segurança Ativos */}
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-                <div className="flex items-center gap-2 text-emerald-700 dark:text-emerald-400">
-                  <KeyRound className="h-4 w-4" />
-                  <h3 className="text-xs font-bold uppercase">
-                    Proteção de Senhas
-                  </h3>
-                </div>
-                <p className="mt-1.5 text-sm font-bold text-slate-900 dark:text-white">
-                  {dbStatus?.securityAlgorithms.passwordHashing ||
-                    'Argon2id (v=19, m=4096 KiB, t=3, p=1)'}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Verificação criptográfica em tempo constante contra ataques de força bruta.
-                </p>
+            {/* Alteração da Senha Mestra do Administrador */}
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex items-center gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
+                <KeyRound className="h-4 w-4 text-[#004A8D] dark:text-sky-400" />
+                <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                  Senha do Administrador Geral
+                </h3>
               </div>
 
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-                <div className="flex items-center gap-2 text-[#004A8D] dark:text-sky-400">
-                  <Lock className="h-4 w-4" />
-                  <h3 className="text-xs font-bold uppercase">
-                    Cofre de Integrações
-                  </h3>
-                </div>
-                <p className="mt-1.5 text-sm font-bold text-slate-900 dark:text-white">
-                  {dbStatus?.securityAlgorithms.integrationSecretsEncryption ||
-                    'AES-256-GCM (96-bit IV + 128-bit AuthTag)'}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Credenciais do Portal MoveEdu e Indecx NPS protegidas em repouso no servidor.
-                </p>
-              </div>
-
-              <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-                <div className="flex items-center gap-2 text-[#004A8D] dark:text-sky-400">
-                  <ShieldAlert className="h-4 w-4" />
-                  <h3 className="text-xs font-bold uppercase">
-                    Controle de Sessão e Acesso
-                  </h3>
-                </div>
-                <p className="mt-1.5 text-sm font-bold text-slate-900 dark:text-white">
-                  RBAC Estrito · Cookies HttpOnly · Rate Limit
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Gestão centralizada de senhas exclusiva pelo Administrador no Painel ADM.
-                </p>
-              </div>
-            </div>
-
-            {/* Tabela da Trilha de Auditoria */}
-            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              <form
+                onSubmit={handleUpdateAdminMasterPassword}
+                className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3 sm:items-end"
+              >
                 <div>
-                  <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Trilha de Auditoria do Sistema ({filteredAuditLogs.length})
-                  </h2>
-                  <p className="text-xs text-slate-500">
-                    Histórico de autenticações, sincronizações cadastrais e eventos administrativos.
-                  </p>
+                  <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                    Nova Senha
+                  </label>
+                  <div className="relative mt-1">
+                    <input
+                      type={showAdminPassword ? 'text' : 'password'}
+                      value={adminNewPassword}
+                      onChange={(e) => setAdminNewPassword(e.target.value)}
+                      placeholder="Mínimo 6 caracteres"
+                      required
+                      className="h-9 w-full rounded-lg border border-slate-300 bg-slate-50 px-2.5 text-xs text-slate-800 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:focus:bg-slate-800"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminPassword((p) => !p)}
+                      className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600"
+                    >
+                      {showAdminPassword ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  <select
-                    value={auditFilterStatus}
-                    onChange={(e) =>
-                      setAuditFilterStatus(
-                        e.target.value as 'ALL' | 'SUCCESS' | 'DENIED' | 'ERROR'
-                      )
-                    }
-                    className="h-8 rounded-lg border border-slate-300 bg-slate-50 px-2.5 text-xs font-semibold text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
-                  >
-                    <option value="ALL">Todos os Eventos</option>
-                    <option value="SUCCESS">Sucesso (SUCCESS)</option>
-                    <option value="DENIED">Negados (DENIED)</option>
-                    <option value="ERROR">Falhas (ERROR)</option>
-                  </select>
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-700 dark:text-slate-300">
+                    Confirmar Senha
+                  </label>
+                  <input
+                    type={showAdminPassword ? 'text' : 'password'}
+                    value={adminConfirmPassword}
+                    onChange={(e) => setAdminConfirmPassword(e.target.value)}
+                    placeholder="Repita a nova senha"
+                    required
+                    className="mt-1 h-9 w-full rounded-lg border border-slate-300 bg-slate-50 px-2.5 text-xs text-slate-800 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:focus:bg-slate-800"
+                  />
+                </div>
 
+                <div>
                   <button
-                    type="button"
-                    onClick={fetchGovernanceTelemetry}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200"
+                    type="submit"
+                    disabled={isUpdatingAdminPassword || !adminNewPassword}
+                    className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-[#004A8D] px-3 text-xs font-bold text-white transition-colors hover:bg-[#003B70] disabled:opacity-50"
                   >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                    <span>Atualizar</span>
+                    {isUpdatingAdminPassword ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <ShieldCheck className="h-3.5 w-3.5" />
+                    )}
+                    <span>Salvar Senha</span>
                   </button>
                 </div>
-              </div>
-
-              <div className="mt-4 overflow-x-auto">
-                <table
-                  data-testid="audit-logs-table"
-                  className="w-full border-collapse text-left text-xs"
-                >
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold uppercase tracking-wider text-slate-500 dark:border-slate-800 dark:bg-slate-800/60">
-                      <th className="px-3 py-2.5">Data / Hora</th>
-                      <th className="px-3 py-2.5">Usuário / Perfil</th>
-                      <th className="px-3 py-2.5">Evento</th>
-                      <th className="px-3 py-2.5">Status</th>
-                      <th className="px-3 py-2.5">Detalhes</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200/70 dark:divide-slate-800">
-                    {filteredAuditLogs.map((log) => (
-                      <tr
-                        key={log.id}
-                        className="hover:bg-slate-50/80 dark:hover:bg-slate-800/40"
-                      >
-                        <td className="px-3 py-2.5 font-mono text-[11px] whitespace-nowrap text-slate-600 dark:text-slate-400">
-                          {formatUserAccessDateTime(log.timestamp)}
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span className="font-bold text-slate-900 dark:text-white">
-                            {log.actorLogin}
-                          </span>
-                          <span className="ml-1.5 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600 dark:bg-slate-800 dark:text-slate-300">
-                            {log.actorRole}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 font-mono text-[11px] font-bold text-[#004A8D] dark:text-sky-400">
-                          {log.action}
-                        </td>
-                        <td className="px-3 py-2.5">
-                          <span
-                            className={`inline-flex rounded px-2 py-0.5 text-[10px] font-bold ${
-                              log.status === 'SUCCESS'
-                                ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300'
-                                : 'bg-rose-50 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300'
-                            }`}
-                          >
-                            {log.status}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2.5 text-slate-600 dark:text-slate-300">
-                          {log.details}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              </form>
             </div>
-          </div>
-        )}
 
-        {/* =====================================================================
-            ABA 4: BANCO DE DADOS RELACIONAL SQLITE, BACKUPS E CHAMADOS LGPD
-           ===================================================================== */}
-        {activeTab === 'banco_lgpd' && (
-          <div
-            data-testid="admin-database-lgpd-section"
-            className="space-y-4"
-          >
-            {/* Supabase Cloud Migration Card */}
-            <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-              <div className="flex items-center justify-between gap-2">
+            {/* Sincronização e Status do Banco Multi-Escola */}
+            <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3 dark:border-slate-800">
                 <div className="flex items-center gap-2">
-                  <Database className="h-5 w-5 text-purple-600 dark:text-purple-400" />
+                  <Database className="h-4 w-4 text-[#004A8D] dark:text-sky-400" />
                   <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                    Migração Completa para o Supabase (Nuvem)
+                    Banco de Dados Multi-Escola
                   </h2>
                 </div>
                 <button
@@ -2096,139 +1838,57 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                   data-testid="trigger-supabase-migration-btn"
                   onClick={handleRunSupabaseMigration}
                   disabled={isMigratingSupabase}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-purple-600 px-3 text-xs font-bold text-white transition-colors hover:bg-purple-700 disabled:opacity-60"
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#004A8D] px-3 text-xs font-bold text-white transition-colors hover:bg-[#003B70] disabled:opacity-60"
                 >
                   {isMigratingSupabase ? (
                     <>
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      <span>Migrando Dados...</span>
+                      <span>Sincronizando...</span>
                     </>
                   ) : (
                     <>
-                      <Database className="h-3.5 w-3.5" />
-                      <span>Migrar Tudo para o Supabase</span>
+                      <RefreshCw className="h-3.5 w-3.5" />
+                      <span>Sincronizar com Supabase</span>
                     </>
                   )}
                 </button>
               </div>
-              <p className="mt-2 text-xs text-slate-500">
-                Clique neste botão para transferir todos os registros de alunos, escolas e pesquisas NPS locais para as tabelas do Supabase, tornando o sistema 100% persistente e funcional em nuvem para produção.
-              </p>
-            </div>
 
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-              {/* Diagnóstico do Banco SQLite + Backups (6 cols) */}
-              <div className="space-y-4 lg:col-span-6">
-                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <HardDrive className="h-5 w-5 text-[#004A8D] dark:text-sky-400" />
-                      <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                        Banco de Dados Relacional (SQLite)
-                      </h2>
-                    </div>
-                    <button
-                      type="button"
-                      data-testid="trigger-manual-backup-btn"
-                      onClick={handleTriggerManualBackup}
-                      disabled={isCreatingBackup}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-[#004A8D] px-3 text-xs font-bold text-white transition-colors hover:bg-[#003B70] disabled:opacity-60"
-                    >
-                      <DownloadCloud className="h-3.5 w-3.5" />
-                      <span>
-                        {isCreatingBackup
-                          ? 'Gerando Backup...'
-                          : 'Gerar Backup Agora'}
-                      </span>
-                    </button>
-                  </div>
-
-                  <div className="mt-4 grid grid-cols-2 gap-2.5 text-xs">
-                    <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-                      <span className="text-[11px] font-semibold text-slate-500">
-                        Arquivo Principal
-                      </span>
-                      <p className="mt-0.5 font-mono text-xs font-bold text-slate-900 dark:text-white">
-                        {dbStatus?.databaseFile ||
-                          '.data/microlins_production.sqlite'}
-                      </p>
-                    </div>
-                    <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
-                      <span className="text-[11px] font-semibold text-slate-500">
-                        Integridade Relacional
-                      </span>
-                      <p className="mt-0.5 text-xs font-bold text-emerald-700 dark:text-emerald-400">
-                        WAL Ativo · Foreign Keys ON
-                      </p>
-                    </div>
-                  </div>
-
-                  {/* Lista de Backups Preventivos */}
-                  <div className="mt-4">
-                    <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                      Snapshots de Backup ({dbStatus?.backups.length || 0})
-                    </h3>
-                    <div className="mt-2 max-h-48 space-y-1.5 overflow-y-auto">
-                      {(dbStatus?.backups || []).map((bk) => (
-                        <div
-                          key={bk.fileName}
-                          className="flex items-center justify-between rounded-lg border border-slate-200/80 bg-slate-50/70 px-3 py-2 text-xs dark:border-slate-800 dark:bg-slate-800/40"
-                        >
-                          <span className="font-mono font-semibold text-slate-800 dark:text-slate-200">
-                            {bk.fileName}
-                          </span>
-                          <span className="text-[11px] text-slate-500">
-                            {(bk.sizeBytes / 1024).toFixed(1)} KB
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Solicitações de Titulares LGPD (6 cols) */}
-              <div className="space-y-4 lg:col-span-6">
-                <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-2xs dark:border-slate-800 dark:bg-slate-900">
-                  <div className="flex items-center gap-2">
-                    <FileCheck2 className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
-                    <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                      Solicitações de Direitos LGPD ({lgpdRequests.length})
-                    </h2>
-                  </div>
-                  <p className="mt-0.5 text-xs text-slate-500">
-                    Chamados registrados através da página de Privacidade e Proteção de Dados.
+              <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">
+                <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                  <span className="text-[11px] font-semibold text-slate-500">
+                    Unidades
+                  </span>
+                  <p className="mt-0.5 text-sm font-black text-slate-900 tabular-nums dark:text-white">
+                    {dbStatus?.counts.schools ?? schools.length}
                   </p>
+                </div>
 
-                  {lgpdRequests.length === 0 ? (
-                    <div className="mt-4 rounded-xl border border-dashed border-slate-200 p-6 text-center text-xs text-slate-500 dark:border-slate-800">
-                      Nenhuma solicitação pendente no momento.
-                    </div>
-                  ) : (
-                    <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">
-                      {lgpdRequests.map((req) => (
-                        <div
-                          key={req.id}
-                          className="rounded-lg border border-slate-200/90 bg-slate-50/70 p-3 text-xs dark:border-slate-800 dark:bg-slate-800/40"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-mono font-bold text-[#004A8D] dark:text-sky-400">
-                              {req.protocol}
-                            </span>
-                            <span className="rounded bg-emerald-50 px-2 py-0.5 text-[10px] font-bold text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300">
-                              {req.status}
-                            </span>
-                          </div>
-                          <p className="mt-1 font-bold text-slate-900 dark:text-white">
-                            {req.requesterName} ({req.requesterEmail})
-                          </p>
-                          <p className="mt-0.5 text-slate-600 dark:text-slate-300">
-                            {req.description}
-                          </p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                  <span className="text-[11px] font-semibold text-slate-500">
+                    Usuários
+                  </span>
+                  <p className="mt-0.5 text-sm font-black text-slate-900 tabular-nums dark:text-white">
+                    {dbStatus?.counts.users ?? totalUsersCount}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                  <span className="text-[11px] font-semibold text-slate-500">
+                    Agendamentos
+                  </span>
+                  <p className="mt-0.5 text-sm font-black text-[#004A8D] tabular-nums dark:text-sky-400">
+                    {dbStatus?.counts.studentRecords ?? 717}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-slate-200/80 bg-slate-50 p-3 dark:border-slate-800 dark:bg-slate-800/50">
+                  <span className="text-[11px] font-semibold text-slate-500">
+                    Convites NPS
+                  </span>
+                  <p className="mt-0.5 text-sm font-black text-purple-700 tabular-nums dark:text-purple-400">
+                    {dbStatus?.counts.npsRecords ?? 676}
+                  </p>
                 </div>
               </div>
             </div>
@@ -2241,7 +1901,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-              Renomear Unidade Escolar
+              Renomear Unidade
             </h3>
             <form onSubmit={handleSaveEditSchool} className="mt-4 space-y-3">
               <input
@@ -2262,7 +1922,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
                   type="submit"
                   className="h-9 rounded-lg bg-[#004A8D] px-4 text-xs font-bold text-white hover:bg-[#003B70]"
                 >
-                  Salvar Alteração
+                  Salvar
                 </button>
               </div>
             </form>
@@ -2277,14 +1937,10 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             <h3 className="text-sm font-bold text-slate-900 dark:text-white">
               Atualizar Senha ({passwordModalUser.nomeCompleto})
             </h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Defina a senha de acesso para o login{' '}
-              <span className="font-mono font-bold text-slate-700 dark:text-slate-200">
-                {passwordModalUser.login}
-              </span>
-              .
-            </p>
-            <form onSubmit={handleSaveNewUserPassword} className="mt-4 space-y-3">
+            <form
+              onSubmit={handleSaveNewUserPassword}
+              className="mt-4 space-y-3"
+            >
               <div>
                 <label className="mb-1 block text-xs font-semibold text-slate-700 dark:text-slate-300">
                   Nova Senha
@@ -2340,7 +1996,7 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
         </div>
       )}
 
-      {/* MODAL DE CONFIRMAÇÃO DE IMPACTO */}
+      {/* MODAL DE CONFIRMAÇÃO */}
       {confirmationModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-xs">
           <div className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl dark:border-slate-800 dark:bg-slate-900">
@@ -2353,14 +2009,6 @@ export const AdminPanelView: React.FC<AdminPanelViewProps> = ({
             <p className="mt-2 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
               {confirmationModal.description}
             </p>
-            <ul className="mt-3 space-y-1.5 rounded-xl bg-slate-50 p-3 text-xs text-slate-700 dark:bg-slate-800/60 dark:text-slate-200">
-              {confirmationModal.impactList.map((imp) => (
-                <li key={imp} className="flex items-start gap-1.5">
-                  <span className="mt-1 h-1.5 w-1.5 shrink-0 rounded-full bg-rose-500" />
-                  <span>{imp}</span>
-                </li>
-              ))}
-            </ul>
             <div className="mt-4 flex justify-end gap-2">
               <button
                 type="button"

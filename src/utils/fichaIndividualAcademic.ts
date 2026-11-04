@@ -484,6 +484,7 @@ export function buildStudentFichaIndividual(
       const seenEvalKeys = new Set<string>();
 
       for (const rec of modRecords) {
+        if (rec.isNotaModuloAnterior) continue;
         const gradeScaled = normalizePortalGradeScale(rec.nota);
         if (gradeScaled) {
           const evalAulaNum =
@@ -558,7 +559,7 @@ export function buildStudentFichaIndividual(
         isModuloAtual: true,
         aulasPrevistas,
         aulasConcluidas,
-        presencasRegistradas: Math.max(presencas, aulasConcluidas),
+        presencasRegistradas: presencas,
         faltasRegistradas: faltas,
         frequenciaFinal,
         avaliacoesRealizadas: avaliacoes.length,
@@ -708,9 +709,22 @@ export function buildStudentFichaIndividual(
   const modulosEmAndamento = modulos.filter((m) => m.statusModulo === 'EM_ANDAMENTO');
   const modulosPendentes = modulos.filter((m) => m.statusModulo === 'PENDENTE');
 
-  const modulosComNota = modulos.filter(
-    (m) => typeof m.mediaFinalEscala100 === 'number' && m.mediaFinalEscala100 > 0
+  // Apenas módulos com status 'CURSADO' (etapas concluídas com avaliação formal) compõem a média geral do curso,
+  // evitando misturar módulos em andamento ou pendentes de notas. Se nenhum foi finalizado ainda, considera avaliações disponíveis.
+  const modulosCursadosComNota = modulos.filter(
+    (m) =>
+      m.statusModulo === 'CURSADO' &&
+      typeof m.mediaFinalEscala100 === 'number' &&
+      m.mediaFinalEscala100 > 0
   );
+  const modulosComNota =
+    modulosCursadosComNota.length > 0
+      ? modulosCursadosComNota
+      : modulos.filter(
+          (m) =>
+            typeof m.mediaFinalEscala100 === 'number' &&
+            m.mediaFinalEscala100 > 0
+        );
   const mediaGeralCursoEscala100 =
     modulosComNota.length > 0
       ? Number(

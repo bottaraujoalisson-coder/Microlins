@@ -5,11 +5,10 @@ export interface PrivacyKnowledgeTopic {
     | 'Armazenamento e Banco de Dados'
     | 'Criptografia e Senhas'
     | 'Controle de Acesso (RBAC)'
+    | 'Isolamento Multi-Escola'
     | 'Coleta e Finalidade'
-    | 'Direitos do Titular (LGPD)'
     | 'Segurança da Conta'
-    | 'Retenção e Compartilhamento'
-    | 'Canal de Atendimento e DPO';
+    | 'Retenção e Compartilhamento';
   categoryLabel: string;
   shortAnswer: string;
   detailedExplanation: string;
@@ -23,12 +22,12 @@ export type PrivacyKnowledgeArticle = PrivacyKnowledgeTopic;
 
 export const PRIVACY_QUICK_QUESTIONS: string[] = [
   'Como meus dados são armazenados?',
+  'Como funciona o isolamento entre escolas?',
   'Quem pode acessar minhas informações?',
-  'Como minha senha é protegida?',
+  'Como as senhas e chaves são protegidas?',
   'Quais informações são coletadas?',
-  'Como solicitar a correção ou exclusão de dados?',
-  'Como funciona a segurança da minha conta?',
-  'Como entrar em contato sobre questões de privacidade?',
+  'Como funciona a segurança da sessão?',
+  'Por quanto tempo os dados são mantidos?',
 ];
 
 export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
@@ -38,12 +37,12 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
     category: 'Armazenamento e Banco de Dados',
     categoryLabel: 'Armazenamento e Banco de Dados',
     shortAnswer:
-      'Seus dados são armazenados em um banco de dados relacional SQLite persistente no servidor, com integridade referencial (Foreign Keys), modo WAL, backups versionados e criptografia autenticada AES-256-GCM para credenciais de integração.',
+      'Os registros operacionais são armazenados em banco de dados relacional com integridade referencial, separação por unidade escolar e comunicação exclusivamente sob HTTPS/TLS.',
     detailedExplanation:
-      'Todas as informações institucionais de escolas, usuários autorizados, sessões de acesso, solicitações de privacidade e logs de auditoria são persistidas em banco de dados relacional estruturado (SQLite com transações ACID). Credenciais de integração com sistemas externos (Portal MoveEdu e Indecx NPS) são criptografadas em repouso utilizando criptografia autenticada com vetor de inicialização (IV) único por registro. Backups automáticos e versionados são mantidos no diretório seguro do servidor antes de qualquer migração estrutural.',
+      'Os dados cadastrais de unidades escolares, perfis de acesso autorizados, agendamentos acadêmicos e convites de pesquisa NPS são persistidos em estrutura relacional (PostgreSQL / SQLite no servidor) com transações atômicas (ACID) e chaves estrangeiras ativas. Segredos de infraestrutura e chaves de API residem estritamente em variáveis de ambiente no servidor, sem exposição ao navegador.',
     legalBasis: 'Art. 46 da LGPD (Lei nº 13.709/2018)',
     technicalProof:
-      'Tabelas relacionais: schools, users, sessions, audit_logs, lgpd_requests e schema_migrations com chaves estrangeiras ativas.',
+      'Tabelas relacionais estruturadas (schools, users, sessions, student_records, nps_records) com validação de esquema e restrições de chave estrangeira.',
     keywords: [
       'como meus dados sao armazenados',
       'armazenamento',
@@ -51,10 +50,31 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
       'onde ficam',
       'guardados',
       'salvos',
+      'postgresql',
       'sqlite',
-      'criptografia',
-      'backup',
       'persistencia',
+    ],
+  },
+  {
+    id: 'isolamento-multi-escola',
+    question: 'Como funciona o isolamento entre escolas?',
+    category: 'Isolamento Multi-Escola',
+    categoryLabel: 'Isolamento Multi-Escola',
+    shortAnswer:
+      'Cada registro acadêmico, usuário e convite NPS possui vínculo obrigatório com o identificador da unidade escolar (school_id / código da unidade), impedindo a leitura cruzada entre franquias.',
+    detailedExplanation:
+      'A arquitetura multi-escola vincula usuários operacionais, alunos, contratos e convites NPS ao identificador único de sua respectiva unidade escolar. Quando um colaborador autentica com perfil ESCOLA, o escopo da sessão restringe todas as consultas e filtros exclusivamente aos registros pertencentes à sua unidade. Apenas o perfil ADMIN possui visão administrativa para gerenciamento de unidades e credenciais.',
+    legalBasis: 'Art. 6º, I e VII da LGPD (Finalidade e Segurança)',
+    technicalProof:
+      'Filtragem obrigatória por school_id, codigo_portal e unidade nas consultas de alunos, educadores e convites NPS.',
+    keywords: [
+      'isolamento',
+      'multi-escola',
+      'outra escola',
+      'unidade',
+      'franquia',
+      'separacao',
+      'school_id',
     ],
   },
   {
@@ -63,12 +83,12 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
     category: 'Controle de Acesso (RBAC)',
     categoryLabel: 'Controle de Acesso (RBAC)',
     shortAnswer:
-      'Apenas profissionais autenticados e expressamente vinculados à unidade escolar possuem acesso aos indicadores pedagógicos, sob controle de acesso baseado em papéis (RBAC) validado no servidor.',
+      'Apenas colaboradores autenticados e vinculados à unidade escolar possuem acesso aos indicadores pedagógicos, sob Controle de Acesso Baseado em Papéis (RBAC).',
     detailedExplanation:
-      'O sistema aplica separação rigorosa entre dois níveis de permissão validados no Back-end: Administrador (ADM) e Perfil da Escola (Auxiliares Pedagógicos, Instrutores e Coordenação). Usuários de uma unidade escolar visualizam exclusivamente os dados pedagógicos de sua respectiva escola, sendo bloqueados pelo servidor de acessar rotas administrativas (/api/admin/*) ou elevar privilégios. Em respeito à privacidade financeira do aluno e da família, o painel pedagógico aplica minimização de dados (Art. 6º, III da LGPD): instrutores visualizam apenas um indicador binário discreto ("Em dia" ou "Em atraso"), sem exposição de valores monetários ou quantidade de parcelas vencidas em sala de aula.',
-    legalBasis: 'Art. 6º, III e VII da LGPD (Lei nº 13.709/2018)',
+      'O sistema opera com dois perfis estritos validados no servidor: Administrador (ADMIN) e Unidade Escolar (ESCOLA). Colaboradores da unidade acessam apenas o acompanhamento pedagógico e de satisfação (NPS) da própria escola, sendo bloqueados de rotas administrativas (/api/admin/*). Em conformidade com o princípio de minimização de dados (Art. 6º, III da LGPD), o painel pedagógico exibe apenas status financeiro binário ("Em dia" ou "Em atraso"), sem expor valores monetários ou boletos.',
+    legalBasis: 'Art. 6º, III e VII da LGPD (Necessidade e Prevenção)',
     technicalProof:
-      'Middleware de autorização no servidor (requireAdmin) valida o token de sessão SHA-256 a cada requisição na API.',
+      'Validação de sessão por token SHA-256 e verificação de perfil (RBAC) nos endpoints do servidor.',
     keywords: [
       'quem pode acessar minhas informacoes',
       'quem acessa',
@@ -77,24 +97,23 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
       'acesso',
       'administrador',
       'professor',
-      'instrutor',
+      'educador',
       'financeiro',
-      'inadimplencia',
       'rbac',
     ],
   },
   {
     id: 'protecao-senha',
-    question: 'Como minha senha é protegida?',
+    question: 'Como as senhas e chaves são protegidas?',
     category: 'Criptografia e Senhas',
     categoryLabel: 'Criptografia e Senhas',
     shortAnswer:
-      'Sua senha de acesso nunca é armazenada em texto puro: ela é protegida com hash criptográfico irreversível Argon2id com salt aleatório de 16 bytes e validação em tempo constante.',
+      'Senhas de usuários são processadas com hash Argon2id (salt aleatório de 16 bytes), credenciais de integração usam criptografia autenticada AES-256-GCM no servidor e segredos ficam em variáveis de ambiente.',
     detailedExplanation:
-      'Utilizamos o algoritmo Argon2id (vencedor da Password Hashing Competition e recomendado pela OWASP), resistente tanto a ataques de força bruta em GPU (side-channel) quanto a ataques de memória (time-memory trade-off). Cada senha recebe um salt criptográfico exclusivo de 128 bits (16 bytes) antes da derivação da chave, no formato padrão PHC ($argon2id$v=19$m=4096,t=3,p=1$...). A verificação durante o login utiliza comparação em tempo constante para impedir ataques de medição de tempo (timing attacks).',
+      'Nenhuma senha de usuário é armazenada em texto plano: aplica-se o algoritmo Argon2id (RFC 9106) com salt único de 128 bits e verificação em tempo constante. Chaves de API e segredos de ambiente são lidos exclusivamente via variáveis de ambiente no servidor (.env), nunca sendo enviados ao cliente front-end nem expostos em colunas legíveis pelo navegador.',
     legalBasis: 'Art. 46 e Art. 49 da LGPD',
     technicalProof:
-      'Módulo src/utils/securityCrypto.ts com Argon2id (RFC 9106) e verificação em tempo constante.',
+      'Hashing Argon2id, criptografia simétrica autenticada em repouso e sanitização automática de respostas da API (sanitizeSchoolsForClient).',
     keywords: [
       'como minha senha e protegida',
       'senha',
@@ -102,7 +121,8 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
       'argon2',
       'argon2id',
       'criptografada',
-      'roubo de senha',
+      'chaves',
+      'variaveis de ambiente',
       'seguranca da senha',
     ],
   },
@@ -112,12 +132,12 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
     category: 'Coleta e Finalidade',
     categoryLabel: 'Coleta e Finalidade',
     shortAnswer:
-      'Coletamos estritamente os dados acadêmicos e cadastrais necessários para o acompanhamento pedagógico, controle de frequência, entrega de material didático e pesquisa de satisfação (NPS).',
+      'São tratados estritamente os dados acadêmicos e cadastrais necessários para acompanhamento de frequência, progresso curricular, entrega de apostila, vínculo com educador e pesquisa NPS.',
     detailedExplanation:
-      'Dados de Alunos e Responsáveis: Nome completo, número de contrato/matrícula, telefone de contato institucional (WhatsApp), e-mail cadastral, curso/formação, módulo atual, horários de início e fim de aula, notas de avaliação, status de apostila e situação financeira binária. Dados de Colaboradores e Usuários: Nome completo, login institucional do Portal, cargo/função, unidade escolar vinculada, registros de último acesso e trilha de auditoria de operações administrativas. Nenhum dado coletado é comercializado ou utilizado para fins alheios à execução do contrato educacional.',
-    legalBasis: 'Art. 7º, V e IX da LGPD (Execução de Contrato)',
+      'Dados de Alunos e Responsáveis: Nome, número de contrato, telefone de contato institucional, e-mail cadastral, curso/formação, módulo, horários de aula, sala, educador responsável, notas, status de material didático e indicador binário de adimplência. Dados de Usuários do Sistema: Nome completo, identificador de login, cargo e unidade escolar vinculada. Os dados são utilizados unicamente para a execução do acompanhamento pedagógico contratado.',
+    legalBasis: 'Art. 7º, V da LGPD (Execução de Contrato)',
     technicalProof:
-      'Inventário de dados restrito às estruturas de acompanhamento escolar e sincronização autorizada.',
+      'Esquema de dados restrito aos atributos operacionais sincronizados dos sistemas oficiais da unidade.',
     keywords: [
       'quais informacoes sao coletadas',
       'dados coletados',
@@ -131,43 +151,17 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
     ],
   },
   {
-    id: 'correcao-exclusao-dados',
-    question: 'Como solicitar a correção ou exclusão de dados?',
-    category: 'Direitos do Titular (LGPD)',
-    categoryLabel: 'Direitos do Titular (LGPD)',
-    shortAnswer:
-      'Você pode registrar uma solicitação formal diretamente nesta página através do formulário "Solicitação de Direitos do Titular (LGPD)" ou junto à Secretaria da sua unidade escolar, gerando um número de protocolo imediato.',
-    detailedExplanation:
-      'Nos termos do Art. 18 da LGPD, o titular dos dados (ou seu responsável legal, no caso de menores) tem direito a: confirmação da existência de tratamento, acesso aos dados, correção de dados incompletos/inexatos, anonimização, bloqueio ou eliminação de dados desnecessários, e revogação de consentimento. Dados vinculados a contratos educacionais ativos e registros obrigatórios de frequência/certificação são retidos pelo prazo legal aplicável à legislação educacional e contratual (Art. 16, I da LGPD). Toda solicitação registrada nesta página é gravada no banco de dados com protocolo único auditável.',
-    legalBasis: 'Art. 16 e Art. 18 da LGPD (Direitos do Titular)',
-    technicalProof:
-      'Endpoint POST /api/privacy/requests com gravação persistente na tabela lgpd_requests e geração de protocolo.',
-    keywords: [
-      'como solicitar a correcao ou exclusao de dados',
-      'excluir',
-      'exclusao',
-      'apagar',
-      'corrigir',
-      'correcao',
-      'atualizar',
-      'direitos',
-      'titular',
-      'lgpd',
-      'anonimizacao',
-    ],
-  },
-  {
     id: 'seguranca-conta',
-    question: 'Como funciona a segurança da minha conta?',
+    question: 'Como funciona a segurança da sessão?',
     category: 'Segurança da Conta',
     categoryLabel: 'Segurança da Conta',
     shortAnswer:
-      'Sua conta possui bloqueio automático contra tentativas excessivas de login (Rate Limiting), tokens de sessão criptográficos com expiração, proteção contra XSS/CSRF/SQL Injection e registro em log de auditoria.',
+      'O acesso conta com limitação de tentativas de login (Rate Limiting), tokens de sessão de 256 bits armazenados por hash SHA-256, sanitização contra XSS e queries parametrizadas.',
     detailedExplanation:
-      'Proteção contra Força Bruta: Após 5 tentativas consecutivas de login malsucedidas, o acesso para o identificador é temporariamente bloqueado por 15 minutos, registrando o evento no log de segurança. Gerenciamento Seguro de Sessões: As sessões utilizam tokens aleatórios de 256 bits de entropia armazenados no banco apenas como hash SHA-256, com cookie HttpOnly + SameSite=Lax e cabeçalho de verificação. Defesa em Profundidade: Todas as entradas passam por sanitização contra XSS, consultas ao banco utilizam exclusivamente Prepared Statements parametrizados contra SQL Injection, e cabeçalhos HTTP de segurança estão ativos.',
+      'Após 5 tentativas consecutivas de login inválidas, o identificador é temporariamente bloqueado por 15 minutos contra ataques de força bruta. As sessões autenticadas geram tokens aleatórios de 256 bits (armazenados no banco apenas como hash SHA-256) com expiração automática, cookies HttpOnly + SameSite=Lax e proteção CSRF em operações sensíveis.',
     legalBasis: 'Art. 46 a 48 da LGPD',
     technicalProof:
-      'Tabelas sessions, login_attempts e audit_logs + cabeçalhos de segurança no servidor Express.',
+      'Controle de tentativas em login_attempts, sessões com hash SHA-256 e consultas SQL parametrizadas (Prepared Statements).',
     keywords: [
       'como funciona a seguranca da minha conta',
       'seguranca da conta',
@@ -178,21 +172,20 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
       'xss',
       'sql injection',
       'csrf',
-      'recuperacao de senha',
     ],
   },
   {
     id: 'retencao-compartilhamento',
-    question: 'Com quem os dados são compartilhados e por quanto tempo são mantidos?',
+    question: 'Por quanto tempo os dados são mantidos?',
     category: 'Retenção e Compartilhamento',
     categoryLabel: 'Retenção e Compartilhamento',
     shortAnswer:
-      'Não há compartilhamento comercial de dados com terceiros. A comunicação ocorre exclusivamente de forma autenticada servidor-a-servidor com os sistemas institucionais da rede (Portal MoveEdu e Indecx NPS).',
+      'Os dados são mantidos durante a vigência do vínculo contratual ativo da unidade e sincronizados apenas servidor-a-servidor com os sistemas institucionais (Portal MoveEdu e Indecx NPS).',
     detailedExplanation:
-      'Os dados acadêmicos são sincronizados diretamente entre o servidor da plataforma e os portais oficiais da franqueadora mediante credenciais institucionais criptografadas da unidade escolar. Os registros são mantidos durante a vigência do vínculo contratual/educacional e pelo período exigido para cumprimento de obrigações legais, regulatórias ou exercício regular de direitos (Art. 16, I da LGPD).',
-    legalBasis: 'Art. 15 e Art. 16 da LGPD (Término do Tratamento)',
+      'Não há comercialização ou compartilhamento de dados com terceiros não autorizados. A sincronização ocorre exclusivamente entre o back-end da plataforma e os sistemas oficiais utilizados pela escola (Portal do Aluno MoveEdu para agendamentos/frequência e Indecx para convites NPS). Os registros permanecem armazenados enquanto necessários para a gestão acadêmica ativa e cumprimento de obrigações legais ou contratuais (Art. 16, I da LGPD), sendo sessões expiradas limpas periodicamente.',
+    legalBasis: 'Art. 15 e Art. 16 da LGPD (Término do Tratamento e Retenção)',
     technicalProof:
-      'Comunicação HTTPS restrita ao Back-end sem exposição de tokens de terceiros no navegador.',
+      'Comunicação autenticada no back-end e rotina automática de expurgo de sessões expiradas.',
     keywords: [
       'compartilhamento',
       'terceiros',
@@ -202,30 +195,6 @@ export const PRIVACY_KNOWLEDGE_BASE: PrivacyKnowledgeTopic[] = [
       'moveedu',
       'indecx',
       'vencimento',
-    ],
-  },
-  {
-    id: 'contato-privacidade',
-    question: 'Como entrar em contato sobre questões de privacidade?',
-    category: 'Canal de Atendimento e DPO',
-    categoryLabel: 'Canal de Atendimento e DPO',
-    shortAnswer:
-      'Você pode abrir um protocolo diretamente nesta página de Privacidade e Proteção de Dados, procurar a Coordenação/Secretaria da unidade escolar ou acionar o canal técnico institucional indicado no rodapé.',
-    detailedExplanation:
-      'Canal Digital Direto: Utilize o formulário de Atendimento ao Titular disponível nesta página para registrar dúvidas, pedidos de acesso, retificação ou informações sobre o tratamento de dados pessoais. Atendimento Presencial na Unidade: A secretaria da unidade escolar está habilitada para atualizar dados cadastrais no sistema oficial (CAD/Portal) que são sincronizados com este painel. Observação Institucional (Art. 41 da LGPD): A nomeação formal do Encarregado pelo Tratamento de Dados Pessoais (DPO) e seu e-mail regulamentar dependem de definição administrativa da mantenedora de cada unidade franqueada.',
-    legalBasis: 'Art. 41 da LGPD (Encarregado pelo Tratamento de Dados)',
-    technicalProof:
-      'Formulário integrado de protocolo LGPD e canais oficiais de suporte documentados.',
-    keywords: [
-      'como entrar em contato sobre questoes de privacidade',
-      'contato',
-      'dpo',
-      'encarregado',
-      'duvida',
-      'suporte',
-      'canal',
-      'reclamacao',
-      'atendimento',
     ],
   },
 ];
@@ -238,10 +207,6 @@ function normalizeSearchText(text: string): string {
     .trim();
 }
 
-/**
- * Pesquisa inteligente na base oficial de Privacidade e Proteção de Dados.
- * Retorna os artigos ordenados por relevância sem criar respostas fictícias.
- */
 export function searchPrivacyKnowledgeBase(
   query: string,
   categoryFilter: string = 'TODAS'

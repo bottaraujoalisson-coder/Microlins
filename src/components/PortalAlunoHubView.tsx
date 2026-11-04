@@ -31,8 +31,16 @@ import {
   UserCheck,
   X,
 } from 'lucide-react';
-import { PORTAL_METADATA } from '../data/microlinsData';
-import { EvaluatedStudentRecord } from '../utils/performanceAnalytics';
+import {
+  ActiveNpsInvitation,
+  PORTAL_METADATA,
+} from '../data/microlinsData';
+import {
+  EvaluatedStudentRecord,
+  evaluatePortalNpsPriorityOnLogin,
+  normalizePersonName,
+} from '../utils/performanceAnalytics';
+import { NpsPortalEvaluationModal } from './NpsPortalEvaluationModal';
 import {
   BoletimModuleRecord,
   buildStudentFichaIndividual,
@@ -51,6 +59,11 @@ interface PortalAlunoHubViewProps {
   onSelectStudentId?: (id: number | null) => void;
   initialSubTab?: FichaIndividualSectionTab;
   unidadeAtual?: string;
+  activeNpsInvitations?: ActiveNpsInvitation[];
+  onNpsInvitationUpdated?: (
+    inviteId: string,
+    patch: Partial<ActiveNpsInvitation>
+  ) => void;
 }
 
 interface SchoolInstitutionalData {
@@ -100,12 +113,20 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
   onSelectStudentId,
   initialSubTab = 'BOLETIM',
   unidadeAtual = PORTAL_METADATA.unidade,
+  activeNpsInvitations = [],
+  onNpsInvitationUpdated,
 }) => {
   // Diretório consolidado sem duplicidades (priorizando o número do contrato)
   const studentDirectory = useMemo(
     () => buildUniqueStudentDirectory(allStudents, unidadeAtual),
     [allStudents, unidadeAtual]
   );
+
+  // Controle de modal NPS prioritário no Portal do Aluno (Seção 1.3)
+  const [activePortalNpsModalInvite, setActivePortalNpsModalInvite] =
+    useState<ActiveNpsInvitation | null>(null);
+  const [dismissedPortalInviteIdsInSession, setDismissedPortalInviteIdsInSession] =
+    useState<Set<string>>(() => new Set());
 
   // Estado da pesquisa de alunos (por contrato ou nome completo/parcial)
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -204,6 +225,75 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
       .then((url) => setQrCodeDataUrl(url))
       .catch(() => setQrCodeDataUrl(''));
   }, [selectedStudentItem]);
+
+  // Avaliação automática das 5 condições de Priorização NPS no Login do Portal do Aluno (Seção 1.3)
+  const studentPendingNpsInvite = useMemo<ActiveNpsInvitation | null>(() => {
+    if (!selectedStudentItem) return null;
+    const normStudent = normalizePersonName(selectedStudentItem.nomeCompleto);
+    return (
+      activeNpsInvitations.find((inv) => {
+        if (inv.answered || inv.invitationStatus === 'respondido') return false;
+        const matchContrato =
+          Boolean(selectedStudentItem.contrato) &&
+          inv.contrato === selectedStudentItem.contrato;
+        const matchName =
+          Boolean(normStudent) &&
+          normalizePersonName(inv.studentName) === normStudent;
+        return matchContrato || matchName;
+      }) || null
+    );
+  }, [selectedStudentItem, activeNpsInvitations]);
+
+  const studentAnsweredNpsInvite = useMemo<ActiveNpsInvitation | null>(() => {
+    if (!selectedStudentItem) return null;
+    const normStudent = normalizePersonName(selectedStudentItem.nomeCompleto);
+    return (
+      activeNpsInvitations.find((inv) => {
+        if (!inv.answered && inv.invitationStatus !== 'respondido') return false;
+        const matchContrato =
+          Boolean(selectedStudentItem.contrato) &&
+          inv.contrato === selectedStudentItem.contrato;
+        const matchName =
+          Boolean(normStudent) &&
+          normalizePersonName(inv.studentName) === normStudent;
+        return matchContrato || matchName;
+      }) || null
+    );
+  }, [selectedStudentItem, activeNpsInvitations]);
+
+  useEffect(() => {
+    if (!selectedStudentItem) {
+      setActivePortalNpsModalInvite(null);
+      return;
+    }
+    const check = evaluatePortalNpsPriorityOnLogin({
+      contrato: selectedStudentItem.contrato,
+      studentName: selectedStudentItem.nomeCompleto,
+      invitations: activeNpsInvitations,
+      hasAnotherPriorityModalOpenInSession: Boolean(activePortalNpsModalInvite),
+    });
+    if (
+      check.shouldShowModal &&
+      check.invitation &&
+      !dismissedPortalInviteIdsInSession.has(check.invitation.id)
+    ) {
+      setActivePortalNpsModalInvite(check.invitation);
+    }
+  }, [
+    selectedStudentItem,
+    activeNpsInvitations,
+    activePortalNpsModalInvite,
+    dismissedPortalInviteIdsInSession,
+  ]);
+
+  const prioritizedPortalInvitesList = useMemo(() => {
+    return activeNpsInvitations.filter(
+      (inv) =>
+        Boolean(inv.priorizarNpsNoLogin) &&
+        !inv.answered &&
+        inv.invitationStatus !== 'respondido'
+    );
+  }, [activeNpsInvitations]);
 
   const handleSelectStudentFromSearch = (item: StudentSearchDirectoryItem) => {
     setSelectedContrato(item.contrato);
@@ -853,6 +943,48 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                 )}
               </div>
             )}
+
+            {/* Lista rápida de alunos com Pesquisa NPS Priorizada no Portal do Aluno (Seção 1.3) */}
+            {prioritizedPortalInvitesList.length > 0 && (
+              <div
+                data-testid="ficha-prioritized-nps-banner"
+                className="mx-auto mt-6 max-w-3xl rounded-xl border border-amber-300 bg-amber-50/80 p-4"
+              >
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <span className="text-xs font-black uppercase tracking-wider text-amber-900">
+                    Pesquisas NPS Priorizadas para o Próximo Login ({prioritizedPortalInvitesList.length})
+                  </span>
+                  <span className="text-[11px] font-semibold text-amber-800">
+                    Clique para simular o acesso do aluno ao Portal
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {prioritizedPortalInvitesList.map((inv) => {
+                    const matchedDir = studentDirectory.find(
+                      (d) =>
+                        (inv.contrato && d.contrato === inv.contrato) ||
+                        normalizePersonName(d.nomeCompleto) ===
+                          normalizePersonName(inv.studentName)
+                    );
+                    if (!matchedDir) return null;
+                    return (
+                      <button
+                        key={inv.id}
+                        type="button"
+                        data-testid={`ficha-prioritized-student-btn-${matchedDir.contrato}`}
+                        onClick={() => handleSelectStudentFromSearch(matchedDir)}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-bold text-amber-950 hover:bg-amber-500 hover:text-white transition-colors cursor-pointer"
+                      >
+                        <span>
+                          #{matchedDir.contrato} · {matchedDir.nomeCompleto} (
+                          {inv.cicloPriorizado || inv.pontoJornada})
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         </section>
       ) : (
@@ -911,6 +1043,42 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {studentPendingNpsInvite && (
+                  <button
+                    type="button"
+                    data-testid="ficha-open-nps-portal-modal-btn"
+                    onClick={() =>
+                      setActivePortalNpsModalInvite(studentPendingNpsInvite)
+                    }
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                      studentPendingNpsInvite.priorizarNpsNoLogin
+                        ? 'border-amber-500 bg-amber-500 text-white hover:bg-amber-600'
+                        : 'border-indigo-300 bg-indigo-50 text-indigo-900 hover:bg-indigo-600 hover:text-white'
+                    }`}
+                  >
+                    <span>
+                      {studentPendingNpsInvite.priorizarNpsNoLogin
+                        ? `Responder NPS Prioritário (${studentPendingNpsInvite.pontoJornada})`
+                        : `Avaliar Experiência NPS (${studentPendingNpsInvite.pontoJornada})`}
+                    </span>
+                  </button>
+                )}
+
+                {!studentPendingNpsInvite && studentAnsweredNpsInvite && (
+                  <span
+                    data-testid="ficha-nps-answered-badge"
+                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 whitespace-nowrap"
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>
+                      NPS Concluído
+                      {typeof studentAnsweredNpsInvite.notaNps === 'number'
+                        ? ` · Nota ${studentAnsweredNpsInvite.notaNps}/10`
+                        : ''}
+                    </span>
+                  </span>
+                )}
+
                 <button
                   type="button"
                   data-testid="ficha-change-student-btn"
@@ -2244,6 +2412,41 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
             </div>
           )}
         </section>
+      )}
+
+      {/* Modal de Avaliação NPS Priorizada no Portal do Aluno (Seção 1.3 e Módulo 2) */}
+      {activePortalNpsModalInvite && (
+        <NpsPortalEvaluationModal
+          invitation={activePortalNpsModalInvite}
+          studentName={
+            selectedStudentItem?.nomeCompleto ||
+            activePortalNpsModalInvite.studentName
+          }
+          contrato={
+            selectedStudentItem?.contrato ||
+            activePortalNpsModalInvite.contrato
+          }
+          onCloseWithoutSubmit={() => {
+            // Caso o aluno feche o modal sem concluir a avaliação, a pesquisa NÃO é marcada como respondida
+            setDismissedPortalInviteIdsInSession((prev) => {
+              const next = new Set(prev);
+              next.add(activePortalNpsModalInvite.id);
+              return next;
+            });
+            setActivePortalNpsModalInvite(null);
+          }}
+          onSubmitted={(res) => {
+            onNpsInvitationUpdated?.(res.inviteId, {
+              answered: true,
+              invitationStatus: 'respondido',
+              priorizarNpsNoLogin: false,
+              notaNps: res.nota,
+              comentarioNps: res.comentario,
+              answeredAt: res.answeredAt,
+            });
+            setActivePortalNpsModalInvite(null);
+          }}
+        />
       )}
     </div>
   );

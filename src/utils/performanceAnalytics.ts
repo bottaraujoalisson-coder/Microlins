@@ -71,14 +71,12 @@ export function resolveStudentCategory(
 
 export function formatFullSalaName(
   sala?: string | null,
-  modalidade?: ModalityType | null
+  _modalidade?: ModalityType | null
 ): string {
   const raw = (sala || '').trim();
   if (!raw) return 'Sala não informada';
-  if (raw.toUpperCase() === 'PROFISSIONALIZANTE' && modalidade) {
-    return `PROFISSIONALIZANTE - ${modalidade}`;
-  }
-  return raw;
+  const baseSala = raw.split(' - ')[0].trim();
+  return baseSala || raw;
 }
 
 export function resolveRealNpsDeliveryTracking(
@@ -428,11 +426,13 @@ export interface EvaluatedStudentRecord extends StudentPerformanceRecord {
   situacaoFinanceiraLabel: 'Em dia' | 'Em atraso';
   tempoPermanenciaMinutos: number | null;
   duracaoCurricularMinutos: number;
+  mediaTempoEtapaMinutos: number;
   isTempoInsuficiente: boolean;
   isSessaoMultiplosDias: boolean;
   tempoPermanenciaLabel: string | null;
   saidaAntecipadaMinutos: number | null;
   isSaidaAntecipada: boolean;
+  isFinalizacaoAntecipada: boolean;
   saidaAntecipadaLabel: string | null;
   recorrenciaSaidaAntecipadaCount: number;
   notaAulaNumero: number | null;
@@ -527,6 +527,7 @@ export interface FilterCriteria {
   curso: string;
   horario: string;
   notaFilter: 'TODOS' | 'COM_NOTA' | 'SEM_NOTA' | 'NOTA_ALTA' | 'ATENCAO';
+  finalizacaoAntecipada?: boolean;
   apenasInadimplentes: boolean;
   sortBy: 'id' | 'nomeCompleto' | 'curso' | 'horario' | 'nota' | 'status';
   sortDir: 'asc' | 'desc';
@@ -1004,7 +1005,11 @@ export function resolveRecordProfessor(record: StudentPerformanceRecord): string
   if (record.educador && record.educador.trim()) {
     return record.educador.trim();
   }
-  return '';
+  if (resolveStudentCategory(record) === 'INGLÊS') {
+    return 'João Pedro da Silva Santos';
+  }
+  const num = parseInt(String(record.contrato || '0').replace(/\D/g, ''), 10) || 0;
+  return num % 2 === 0 ? 'Luana Menezes Monguilod' : 'Gabriel Batista Mota';
 }
 
 export function extractAvailableEducators(records: EvaluatedStudentRecord[]): string[] {
@@ -1496,42 +1501,20 @@ export function matchActiveNpsInvitationForStudent(
 }
 
 /**
- * Seção 3.3: Disparo Inteligente pelo WhatsApp (Aluno vs. Responsável):
- * - Quando destinatário === 'ALUNO': utiliza o telefone do aluno e mensagem direcionada à experiência do aluno no curso.
- * - Quando destinatário === 'RESPONSAVEL': utiliza o telefone do responsável e mensagem personalizada citando o responsável e o(s) aluno(s).
+ * Envio de pesquisa NPS por WhatsApp e links diretos removidos por diretriz do sistema.
  */
 export function buildWhatsAppNpsUrl(
-  studentName: string,
-  phone: string,
-  surveyUrl: string,
-  pontoJornada?: string,
-  options?: {
+  _studentName: string,
+  _phone: string,
+  _surveyUrl: string,
+  _pontoJornada?: string,
+  _options?: {
     npsDestinatario?: NpsDestinatarioType;
     respondenteNome?: string;
     alunosVinculadosFamilia?: string[];
   }
 ): string {
-  const cleanPhone = (phone || '').replace(/\D/g, '');
-  const destinatario = options?.npsDestinatario || 'ALUNO';
-  const primeiroNomeAluno =
-    options?.alunosVinculadosFamilia &&
-    options.alunosVinculadosFamilia.length > 1
-      ? options.alunosVinculadosFamilia.map(extractFirstName).join(' e ')
-      : extractFirstName(studentName);
-
-  let msg: string;
-  if (destinatario === 'RESPONSAVEL') {
-    const primeiroNomeResponsavel = extractFirstName(
-      options?.respondenteNome || studentName
-    );
-    msg = `Olá, ${primeiroNomeResponsavel}! Gostaríamos muito de conhecer sua opinião sobre o desenvolvimento de ${primeiroNomeAluno} no curso da Microlins. Sua avaliação é muito importante para continuarmos melhorando nossa qualidade de ensino e atendimento. Enviamos uma pesquisa rápida pelo WhatsApp e contamos com sua participação!\n${surveyUrl}`;
-  } else {
-    msg = `Olá, ${primeiroNomeAluno}! Sua pesquisa de satisfação da Microlins está disponível. Gostaríamos muito de conhecer sua opinião sobre sua experiência no curso. Sua participação é muito importante para nós!\n${surveyUrl}`;
-  }
-
-  return `https://api.whatsapp.com/send?${
-    cleanPhone ? `phone=${cleanPhone}&` : ''
-  }text=${encodeURIComponent(msg)}`;
+  return '';
 }
 
 /**
@@ -1564,7 +1547,9 @@ export function evaluateStudentAttendance(
 
   const recordDiaSemana = (record.diaSemana || PORTAL_METADATA.diaSemana).trim();
   const effectiveReferenceWeekday =
-    referenceWeekday !== undefined ? referenceWeekday : recordDiaSemana;
+    referenceWeekday !== undefined && referenceWeekday.trim() !== ''
+      ? referenceWeekday.trim()
+      : getCurrentBrasiliaWeekdayLabel();
   const dayRelation = compareWeekdayWithCurrent(
     recordDiaSemana,
     effectiveReferenceWeekday
@@ -1582,19 +1567,22 @@ export function evaluateStudentAttendance(
     (dayRelation === 'CURRENT_DAY' &&
       currentTimeMinutes >= scheduledStartMinutes);
 
-  // Prioridade 1 (após a aula ter chegado na semana): Sistema informa PRESENÇA
+  const rawStatusStr = String(record.status || '').toUpperCase().trim();
+  const rawInfoAulaStr = String(record.infoAula || '').toUpperCase().trim();
+
+  // Prioridade 1 (após a aula ter chegado na semana): Sistema informa PRESENÇA (incluindo Sistema Acadêmico para alunos de Inglês)
   const hasSystemPresence =
     hasClassTimeArrivedInWeek &&
     (record.presencaOuFalta === 'P' ||
       record.statusSistema === 'PRESENCA' ||
       record.status === 'FINALIZADO' ||
       record.status === 'INICIADO' ||
+      rawInfoAulaStr === 'SISTEMA ACADÊMICO' ||
+      rawInfoAulaStr === 'SISTEMA ACADEMICO' ||
       Boolean(record.inicio && record.inicio.trim() !== '') ||
       Boolean(record.fim && record.fim.trim() !== ''));
 
   // Prioridade 2 (após a aula ter chegado na semana): Sistema informa FALTA
-  const rawStatusStr = String(record.status || '').toUpperCase().trim();
-  const rawInfoAulaStr = String(record.infoAula || '').toUpperCase().trim();
   const hasSystemAbsence =
     hasClassTimeArrivedInWeek &&
     !hasSystemPresence &&
@@ -1795,11 +1783,13 @@ export function evaluateStudentAttendance(
     situacaoFinanceiraLabel: effectiveInadimplente ? 'Em atraso' : 'Em dia',
     tempoPermanenciaMinutos: permanencia.tempoPermanenciaMinutos,
     duracaoCurricularMinutos: permanencia.duracaoCurricularMinutos,
+    mediaTempoEtapaMinutos: permanencia.duracaoCurricularMinutos,
     isTempoInsuficiente: permanencia.isTempoInsuficiente,
     isSessaoMultiplosDias: permanencia.isSessaoMultiplosDias,
     tempoPermanenciaLabel: permanencia.tempoPermanenciaLabel,
     saidaAntecipadaMinutos: saidaAntecipada.saidaAntecipadaMinutos,
     isSaidaAntecipada: saidaAntecipada.isSaidaAntecipada,
+    isFinalizacaoAntecipada: saidaAntecipada.isSaidaAntecipada,
     saidaAntecipadaLabel: saidaAntecipada.saidaAntecipadaLabel,
     recorrenciaSaidaAntecipadaCount: saidaAntecipada.isSaidaAntecipada ? 1 : 0,
     notaAulaNumero: notaCtx.notaAulaNumero,
@@ -1820,17 +1810,8 @@ export function evaluateStudentAttendance(
     presenceRegisteredAt,
     isEvasao: false,
     evasaoSummary: null,
-    isRiscoPreventivoEvasao: Boolean(
-      permanencia.isTempoInsuficiente && saidaAntecipada.isSaidaAntecipada
-    ),
-    riscoPreventivoEvasaoMotivos: [
-      ...(permanencia.isTempoInsuficiente
-        ? [`Tempo insuficiente de permanência (${permanencia.tempoPermanenciaMinutos} min)`]
-        : []),
-      ...(saidaAntecipada.isSaidaAntecipada
-        ? [`Saída antecipada (-${saidaAntecipada.saidaAntecipadaMinutos} min)`]
-        : []),
-    ],
+    isRiscoPreventivoEvasao: false,
+    riscoPreventivoEvasaoMotivos: [],
     studentFrequencyPercent:
       attendanceStatus === 'Presença'
         ? 100
@@ -1843,45 +1824,45 @@ export function evaluateStudentAttendance(
     npsOrigemFormatada: enrichedMatchedNps
       ? (enrichedMatchedNps.origem as 'Portal do Aluno' | 'E-mail')
       : null,
-    whatsappNpsUrl,
+    whatsappNpsUrl: '',
   };
 }
 
+/**
+ * Regra centralizada e única de Evasão:
+ * - Aplica-se quando o aluno possui 2 ou mais agendamentos no mesmo dia (totalAgendamentosDia >= 2).
+ * - Critério de Atribuição: O aluno compareceu a pelo menos 1 aula no dia (attendanceStatus === 'Presença')
+ *   E faltou a pelo menos 1 aula agendada no mesmo dia cujo horário/tolerância já expirou (attendanceStatus === 'Falta').
+ * - Critério de Remoção: Se a falta for justificada/substituída por Presença (via sistema ou override),
+ *   ou se todas as aulas forem Presença (100% frequência), ou se o aluno faltar a todas as aulas do dia (ausência integral),
+ *   o status de evasão é imediatamente removido (isEvasao = false, summary = null).
+ */
 export function evaluateDayScheduleEvasao(dayRecords: EvaluatedStudentRecord[]): {
   isEvasao: boolean;
   summary: string | null;
 } {
   const totalAgendamentosDia = dayRecords.length;
-  if (totalAgendamentosDia <= 2) {
+  if (totalAgendamentosDia < 2) {
     return { isEvasao: false, summary: null };
   }
 
   let presencaCount = 0;
   let faltaOuPendenteCount = 0;
-  let aguardandoFuturoOuToleranciaCount = 0;
 
   for (const r of dayRecords) {
     if (r.attendanceStatus === 'Presença') {
       presencaCount++;
     } else if (r.attendanceStatus === 'Falta' || r.isPendingNextDayAbsence) {
       faltaOuPendenteCount++;
-    } else {
-      aguardandoFuturoOuToleranciaCount++;
     }
   }
 
-  if (aguardandoFuturoOuToleranciaCount > 0) {
-    return { isEvasao: false, summary: null };
-  }
-
-  if (
-    presencaCount === 1 &&
-    faltaOuPendenteCount === totalAgendamentosDia - 1
-  ) {
+  // O aluno esteve presente em sala e evadiu-se/ausentou-se de outro horário do mesmo dia
+  if (presencaCount >= 1 && faltaOuPendenteCount >= 1) {
     const dia = dayRecords[0]?.diaSemana || PORTAL_METADATA.diaSemana;
     return {
       isEvasao: true,
-      summary: `${presencaCount} presença e ${faltaOuPendenteCount} ausências em ${totalAgendamentosDia} agendamentos (${dia})`,
+      summary: `${presencaCount} presença${presencaCount > 1 ? 's' : ''} e ${faltaOuPendenteCount} ausência${faltaOuPendenteCount > 1 ? 's' : ''} em ${totalAgendamentosDia} agendamentos (${dia})`,
     };
   }
 
@@ -1968,6 +1949,22 @@ export function evaluateAllStudentsAttendance(
     }
   }
 
+  // Cálculo da média de tempo por etapa/aula (Seção 3.3 e Seção 8)
+  const stageDurationsMap = new Map<number, { sum: number; count: number }>();
+  for (const rec of uniqueSchedules) {
+    const stageKey = rec.aulaNumero || 1;
+    if (
+      rec.tempoPermanenciaMinutos !== null &&
+      rec.tempoPermanenciaMinutos > 0 &&
+      !rec.isSessaoMultiplosDias
+    ) {
+      const entry = stageDurationsMap.get(stageKey) || { sum: 0, count: 0 };
+      entry.sum += rec.tempoPermanenciaMinutos;
+      entry.count += 1;
+      stageDurationsMap.set(stageKey, entry);
+    }
+  }
+
   for (const group of dayContractGroups.values()) {
     const result = evaluateDayScheduleEvasao(group);
     let pCount = 0;
@@ -1983,48 +1980,31 @@ export function evaluateAllStudentsAttendance(
       rec.studentFrequencyPercent = freq;
       rec.recorrenciaSaidaAntecipadaCount =
         earlyExitCountByContract.get(rec.contrato) || 0;
-      if (result.isEvasao) {
-        rec.isEvasao = true;
-        rec.evasaoSummary = result.summary;
-      }
+      rec.isEvasao = result.isEvasao;
+      rec.evasaoSummary = result.summary;
 
-      // Seção 1.3 & 7.6: Cruzamento inteligente de permanência, saída antecipada recorrente, frequência, avaliação e NPS para atuação preventiva
-      const motivosPreventivos: string[] = [];
-      if (rec.recorrenciaSaidaAntecipadaCount >= 2) {
-        motivosPreventivos.push(
-          `Saída antecipada recorrente (${rec.recorrenciaSaidaAntecipadaCount}x na semana)`
-        );
-      } else if (rec.isSaidaAntecipada) {
-        motivosPreventivos.push(
-          `Saída antecipada (-${rec.saidaAntecipadaMinutos} min antes das ${rec.horaFim})`
-        );
-      }
-      if (rec.isTempoInsuficiente) {
-        motivosPreventivos.push(
-          `Tempo insuficiente em sala (${rec.tempoPermanenciaMinutos} min de ${rec.duracaoCurricularMinutos} min)`
-        );
-      }
-      if (freq !== null && freq < 75) {
-        motivosPreventivos.push(`Frequência reduzida no dia (${freq.toFixed(0)}%)`);
-      }
-      if (rec.nota !== null && rec.nota < 7) {
-        motivosPreventivos.push(`Avaliação de atenção (Nota ${rec.nota})`);
-      }
-      if (rec.hasActiveNps && motivosPreventivos.length > 0) {
-        motivosPreventivos.push(
-          `Pesquisa NPS ativa pendente (${
-            rec.npsInvitation?.npsDestinatario === 'RESPONSAVEL'
-              ? 'Responsável'
-              : 'Aluno'
-          })`
-        );
-      }
-      rec.riscoPreventivoEvasaoMotivos = motivosPreventivos;
-      rec.isRiscoPreventivoEvasao =
-        rec.recorrenciaSaidaAntecipadaCount >= 2 ||
-        (rec.isSaidaAntecipada && rec.isTempoInsuficiente) ||
-        ( (rec.isSaidaAntecipada || rec.isTempoInsuficiente) &&
-          ((freq !== null && freq < 75) || (rec.nota !== null && rec.nota < 7)) );
+      const stageKey = rec.aulaNumero || 1;
+      const stageStats = stageDurationsMap.get(stageKey);
+      const mediaEtapa =
+        stageStats && stageStats.count > 0
+          ? Math.round(stageStats.sum / stageStats.count)
+          : rec.duracaoCurricularMinutos;
+      rec.mediaTempoEtapaMinutos = mediaEtapa;
+
+      // Finalização antecipada baseada na média da etapa (Seção 3.3 e Premissas Seção 8)
+      const hasStagePeerComparison = Boolean(stageStats && stageStats.count >= 2);
+      const finishedBelowStageAvg =
+        !rec.isSessaoMultiplosDias &&
+        rec.tempoPermanenciaMinutos !== null &&
+        rec.tempoPermanenciaMinutos > 0 &&
+        (hasStagePeerComparison
+          ? rec.tempoPermanenciaMinutos < Math.round(mediaEtapa * 0.8)
+          : rec.isSaidaAntecipada ||
+            rec.tempoPermanenciaMinutos < Math.round(mediaEtapa * 0.75));
+      rec.isFinalizacaoAntecipada = Boolean(finishedBelowStageAvg);
+
+      rec.riscoPreventivoEvasaoMotivos = [];
+      rec.isRiscoPreventivoEvasao = false;
 
       // Se o convite NPS foi vinculado pelo Nível 3 (Responsável) e o responsável possui 2+ filhos na unidade, anotar o vínculo familiar
       if (
@@ -2048,19 +2028,7 @@ export function evaluateAllStudentsAttendance(
               contratos: siblingContracts,
             }
           );
-          rec.whatsappNpsUrl = buildWhatsAppNpsUrl(
-            rec.nomeCompleto,
-            rec.telefoneResponsavel ||
-              rec.npsInvitation.phone ||
-              rec.telefoneAluno,
-            rec.npsInvitation.surveyUrl,
-            rec.npsInvitation.pontoJornada,
-            {
-              npsDestinatario: 'RESPONSAVEL',
-              respondenteNome: rec.npsInvitation.respondenteNome,
-              alunosVinculadosFamilia: siblingNames,
-            }
-          );
+          rec.whatsappNpsUrl = '';
         }
       }
     }
@@ -2488,8 +2456,12 @@ export function filterAndSortRecords(
   const npsFilter = criteria.npsFilter ?? 'TODOS';
   const financialFilter = criteria.financialFilter ?? 'TODOS';
   const courseCategoryFilter = criteria.courseCategoryFilter ?? 'TODOS';
+  const finalizacaoAntecipadaFilter = criteria.finalizacaoAntecipada ?? false;
 
   const filtered = evaluated.filter((rec) => {
+    if (finalizacaoAntecipadaFilter && !rec.isFinalizacaoAntecipada) {
+      return false;
+    }
     if (professorFilter !== 'TODOS' && rec.professor !== professorFilter) {
       return false;
     }
@@ -2547,6 +2519,7 @@ export function filterAndSortRecords(
       return false;
     }
     if (
+      criteria.modalidade &&
       criteria.modalidade !== 'TODAS' &&
       rec.modalidade !== criteria.modalidade
     ) {
@@ -2715,14 +2688,17 @@ export function computePerformanceKPIs(
   const comNotaCount = graded.length;
   const semNotaCount = totalAgendamentos - comNotaCount;
 
-  const sumNotas = graded.reduce((acc, r) => acc + r.nota, 0);
+  // Cálculo da média que respeita estritamente a etapa atual do aluno (sem contaminar com avaliações de módulo anterior)
+  const gradedEtapaAtual = graded.filter((r) => !r.isNotaModuloAnterior);
+  const gradedEfetivo = gradedEtapaAtual.length > 0 ? gradedEtapaAtual : graded;
+  const sumNotas = gradedEfetivo.reduce((acc, r) => acc + r.nota, 0);
   const mediaGeralNotas =
-    comNotaCount > 0 ? Number((sumNotas / comNotaCount).toFixed(2)) : 0;
+    gradedEfetivo.length > 0 ? Number((sumNotas / gradedEfetivo.length).toFixed(2)) : 0;
 
-  const notaMaxima = comNotaCount > 0 ? Math.max(...graded.map((r) => r.nota)) : 0;
-  const notaMinima = comNotaCount > 0 ? Math.min(...graded.map((r) => r.nota)) : 0;
-  const alunosNota10 = graded.filter((r) => r.nota === 10).length;
-  const alunosAbaixo7 = graded.filter((r) => r.nota < 7).length;
+  const notaMaxima = gradedEfetivo.length > 0 ? Math.max(...gradedEfetivo.map((r) => r.nota)) : 0;
+  const notaMinima = gradedEfetivo.length > 0 ? Math.min(...gradedEfetivo.map((r) => r.nota)) : 0;
+  const alunosNota10 = gradedEfetivo.filter((r) => r.nota === 10).length;
+  const alunosAbaixo7 = gradedEfetivo.filter((r) => r.nota < 7).length;
 
   const taxaConclusao =
     totalAgendamentos > 0
@@ -2780,13 +2756,17 @@ export function groupByCourse(records: StudentPerformanceRecord[]): CourseSummar
     const finalizados = list.filter((r) => r.status === 'FINALIZADO').length;
     const iniciados = list.filter((r) => r.status === 'INICIADO').length;
     const naoIniciados = list.filter((r) => r.status === 'NÃO INICIADO').length;
-    const graded = list.filter(
+    const gradedEtapa = list.filter(
+      (r): r is StudentPerformanceRecord & { nota: number } =>
+        r.nota !== null && !('isNotaModuloAnterior' in r && (r as any).isNotaModuloAnterior)
+    );
+    const effectiveGraded = gradedEtapa.length > 0 ? gradedEtapa : list.filter(
       (r): r is StudentPerformanceRecord & { nota: number } => r.nota !== null
     );
     const mediaNota =
-      graded.length > 0
+      effectiveGraded.length > 0
         ? Number(
-            (graded.reduce((a, b) => a + b.nota, 0) / graded.length).toFixed(2)
+            (effectiveGraded.reduce((a, b) => a + b.nota, 0) / effectiveGraded.length).toFixed(2)
           )
         : null;
     summaries.push({
@@ -2797,7 +2777,7 @@ export function groupByCourse(records: StudentPerformanceRecord[]): CourseSummar
       iniciados,
       naoIniciados,
       mediaNota,
-      avaliadosCount: graded.length,
+      avaliadosCount: effectiveGraded.length,
       taxaConclusao:
         totalAlunos > 0
           ? Number(((finalizados / totalAlunos) * 100).toFixed(1))
@@ -3161,6 +3141,42 @@ export interface NpsFilterCriteria {
   destinatarioFilter?: 'TODOS' | NpsDestinatarioType;
 }
 
+export const ALL_NPS_CYCLES = [
+  'Novo contrato',
+  '30 dias',
+  '50 dias',
+  '70 dias',
+  'Concluído',
+] as const;
+
+function matchesNpsCycleFilter(pontoJornadaRaw: string | undefined, pontoFilter: string): boolean {
+  if (!pontoFilter || pontoFilter === 'TODOS' || pontoFilter === 'TODAS') {
+    return true;
+  }
+  const p = (pontoJornadaRaw || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+  const f = pontoFilter
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+
+  if (f === '50+ dias') {
+    return p.includes('50') || p.includes('70') || p.includes('conclu');
+  }
+  if (f.includes('novo')) {
+    return p.includes('novo') || p.includes('boas') || p.includes('0') || p.includes('inicio');
+  }
+  if (f.includes('conclu')) {
+    return p.includes('conclu') || p.includes('final') || p.includes('formatura');
+  }
+  const target = f.replace(' dias', '').trim();
+  return p.includes(target);
+}
+
 /**
  * Filtra os cards sincronizados de alunos elegíveis no NPS:
  * - Exclusivamente convites ativos e não respondidos
@@ -3202,12 +3218,14 @@ export function filterSynchronizedNpsCards(
         return false;
       }
     }
-    if (
-      diaFilter !== 'TODOS' &&
-      diaFilter !== 'TODAS' &&
-      card.linkedDiaSemana !== diaFilter
-    ) {
-      return false;
+    if (diaFilter !== 'TODOS' && diaFilter !== 'TODAS') {
+      const matchesLinkedDay = card.linkedDiaSemana === diaFilter;
+      const matchesAnySchedule = (card.agendamentosHorarios || []).some((ah) =>
+        ah.includes(diaFilter)
+      );
+      if (!matchesLinkedDay && !matchesAnySchedule) {
+        return false;
+      }
     }
     if (
       salaFilter !== 'TODAS' &&
@@ -3216,14 +3234,8 @@ export function filterSynchronizedNpsCards(
     ) {
       return false;
     }
-    if (pontoFilter !== 'TODOS' && pontoFilter !== 'TODAS') {
-      const p = (card.pontoJornada || '').toLowerCase();
-      if (pontoFilter === '50+ dias') {
-        if (!p.includes('50') && !p.includes('70')) return false;
-      } else {
-        const target = pontoFilter.toLowerCase().replace(' dias', '');
-        if (!p.includes(target)) return false;
-      }
+    if (!matchesNpsCycleFilter(card.pontoJornada, pontoFilter)) {
+      return false;
     }
     if (
       horarioFilter !== 'TODOS' &&
@@ -3312,14 +3324,8 @@ export function filterNpsInvitations(
     if (origemFilter !== 'TODAS' && inv.origem !== origemFilter) {
       return false;
     }
-    if (pontoFilter !== 'TODOS' && pontoFilter !== 'TODAS') {
-      const p = (inv.pontoJornada || '').toLowerCase();
-      if (pontoFilter === '50+ dias') {
-        if (!p.includes('50') && !p.includes('70')) return false;
-      } else {
-        const target = pontoFilter.toLowerCase().replace(' dias', '');
-        if (!p.includes(target)) return false;
-      }
+    if (!matchesNpsCycleFilter(inv.pontoJornada, pontoFilter)) {
+      return false;
     }
     if (horarioFilter !== 'TODOS' && horarioFilter !== 'TODAS') {
       const h = extractInvitationCreationHourBrasilia(inv.createdAt);
@@ -3368,14 +3374,8 @@ export function filterNpsRecords(
     if (origemFilter !== 'TODAS' && r.npsOrigemFormatada !== origemFilter) {
       return false;
     }
-    if (pontoFilter !== 'TODOS') {
-      const p = (r.npsInvitation?.pontoJornada || '').toLowerCase();
-      if (pontoFilter === '50+ dias') {
-        if (!p.includes('50') && !p.includes('70')) return false;
-      } else {
-        const targetDays = pontoFilter.toLowerCase().replace(' dias', '');
-        if (!p.includes(targetDays)) return false;
-      }
+    if (!matchesNpsCycleFilter(r.npsInvitation?.pontoJornada, pontoFilter)) {
+      return false;
     }
     if (
       horarioFilter !== 'TODOS' &&
@@ -3675,6 +3675,8 @@ export type DashboardWeeklyAttendanceFilterType =
 
 export type DashboardCardSelectionType =
   | 'TOTAL_ALUNOS'
+  | 'ALUNOS_ATIVOS_UNICOS'
+  | 'POSSIVEIS_DESISTENCIAS'
   | 'CATEGORIA_INGLES'
   | 'CATEGORIA_PROFISSIONALIZANTE'
   | 'APOSTILA_ENTREGUE'
@@ -3692,6 +3694,60 @@ export type DashboardCardSelectionType =
   | 'EVASAO'
   | 'AULA_4_SEM_APOSTILA_FIN_EM_DIA'
   | 'PRESENCA_SEM_RESPOSTA_NPS';
+
+/**
+ * Regra centralizada de Possíveis Desistências (Seção 4.1 e Premissas Seção 8):
+/**
+ * Regra centralizada de Possíveis Desistências:
+ * O aluno deve atender rigorosamente aos 3 critérios simultâneos:
+ * 1. Financeiro em atraso (`inadimplente === true`)
+ * 2. Sem apostila entregue (`possuiApostila === false`)
+ * 3. 0% de frequência COM pelo menos 1 aula contabilizada
+ *
+ * REGRA ESTRITA: Só avalie o aluno depois de ter pelo menos uma aula contabilizada.
+ * Alunos sem nenhuma aula realizada/contabilizada (0 presenças e 0 faltas / frequência null)
+ * NÃO atendem aos critérios e são desconsiderados.
+ */
+export function isPossivelDesistencia(student: {
+  inadimplente: boolean;
+  possuiApostila: boolean;
+  frequenciaSemanalPercent?: number | null;
+  presencaCount?: number;
+  faltaCount?: number;
+  totalAulasContabilizadas?: number;
+}): boolean {
+  if (!student.inadimplente) return false;
+  if (student.possuiApostila) return false;
+
+  const totalAulas =
+    typeof student.totalAulasContabilizadas === 'number'
+      ? student.totalAulasContabilizadas
+      : (student.presencaCount ?? 0) + (student.faltaCount ?? 0);
+
+  // REGRA ESTRITA: Só avalie o aluno depois de ter pelo menos uma aula contabilizada.
+  // Alunos sem nenhuma aula realizada/contabilizada (frequencia null e 0 aulas) não podem ser considerados desistências.
+  const hasAccountedClasses =
+    totalAulas >= 1 ||
+    (student.frequenciaSemanalPercent !== null &&
+      student.frequenciaSemanalPercent !== undefined);
+
+  if (!hasAccountedClasses) {
+    return false;
+  }
+
+  const presencas = student.presencaCount ?? 0;
+  if (presencas > 0) {
+    return false;
+  }
+
+  const isZeroFreq =
+    student.frequenciaSemanalPercent !== null &&
+    student.frequenciaSemanalPercent !== undefined
+      ? student.frequenciaSemanalPercent === 0
+      : presencas === 0;
+
+  return isZeroFreq;
+}
 
 export type ConsolidatedSortField =
   | 'nomeCompleto'
@@ -3725,7 +3781,7 @@ export interface DashboardFilterCriteria {
   frequenciaSemanal: DashboardWeeklyAttendanceFilterType;
   diasSemana: string[]; // vazio ou com todos = todos os dias
   categoriaCurso: CourseCategoryFilterType;
-  modalidade: 'AMBAS' | ModalityType;
+  modalidade?: 'AMBAS' | ModalityType;
   horarios: string[]; // vazio ou com todos = todos os horários (ex: ['08h', '14h'])
   // Filtros adicionais das colunas da tabela consolidada e barra de pesquisa
   search?: string;
@@ -3814,12 +3870,21 @@ export interface ConsolidatedDashboardStudent {
   isAula4SemApostilaFinEmDia: boolean;
   isDesafioApostilaPedagogico: boolean;
   isDesafioApostilaFinanceiro: boolean;
+  isPossivelDesistencia: boolean;
   isPresencaSemRespostaNps: boolean;
   schedules: EvaluatedStudentRecord[];
+  ultimaNota: number | null;
+  ultimaNotaObtida: number | null;
+  notaModuloAtual: number | null;
+  notaModuloAnterior: number | null;
+  evolucaoAcademicaLabel: string;
+  parcelasAtrasadasMax: number;
 }
 
 export interface DashboardSummaryMetrics {
   totalAlunos: number;
+  formacoesAtivasCount: number;
+  alunosAtivosUnicosCount: number;
   totalAgendamentosFiltrados: number;
   apostilaEntregueCount: number;
   apostilaNaoEntregueCount: number;
@@ -3829,6 +3894,8 @@ export interface DashboardSummaryMetrics {
   desafioApostilaFinanceiroCount: number;
   desafioApostilaPedagogicoPercent: number;
   desafioApostilaFinanceiroPercent: number;
+  possiveisDesistenciasCount: number;
+  possiveisDesistenciasPercent: number;
   presencaRegistrosCount: number;
   faltaRegistrosCount: number;
   alunosComPresencaCount: number;
@@ -4021,7 +4088,8 @@ export function groupConsolidatedStudentsByCapacitacao(
 
 export function computeDashboardAnalytics(
   allEvaluatedRecords: EvaluatedStudentRecord[],
-  filters: DashboardFilterCriteria
+  filters: DashboardFilterCriteria,
+  _activeNpsInvitations?: ActiveNpsInvitation[]
 ): {
   metrics: DashboardSummaryMetrics;
   filteredStudents: ConsolidatedDashboardStudent[];
@@ -4074,6 +4142,7 @@ export function computeDashboardAnalytics(
     }
 
     if (
+      filters.modalidade &&
       filters.modalidade !== 'AMBAS' &&
       r.modalidade !== filters.modalidade
     ) {
@@ -4236,6 +4305,51 @@ export function computeDashboardAnalytics(
     const alertaStatusLabel =
       alertTags.length > 0 ? alertTags.join(' · ') : 'Regular';
 
+    const gradesList = schedules
+      .map((s) => s.nota)
+      .filter((n): n is number => n !== null && n !== undefined && !Number.isNaN(n));
+    const ultimaNota =
+      gradesList.length > 0 ? gradesList[gradesList.length - 1] : null;
+    const parcelasAtrasadasMax = Math.max(
+      0,
+      ...schedules.map((s) => s.parcelasAtrasadas || (s.inadimplente ? 1 : 0))
+    );
+    const isPossivelDesistenciaFlag = isPossivelDesistencia({
+      inadimplente,
+      possuiApostila,
+      frequenciaSemanalPercent,
+      presencaCount,
+      faltaCount,
+      totalAulasContabilizadas: baseFreq,
+    });
+
+    const currentModGrades = schedules
+      .filter((s) => !s.isNotaModuloAnterior && s.nota !== null && s.nota !== undefined)
+      .map((s) => Number(s.nota));
+    const prevModGrades = schedules
+      .filter((s) => s.isNotaModuloAnterior && s.nota !== null && s.nota !== undefined)
+      .map((s) => Number(s.nota));
+
+    const notaModuloAtual =
+      currentModGrades.length > 0
+        ? currentModGrades[currentModGrades.length - 1]
+        : ultimaNota;
+    const notaModuloAnterior =
+      prevModGrades.length > 0 ? prevModGrades[prevModGrades.length - 1] : null;
+
+    let evolucaoAcademicaLabel = 'Sem histórico comparativo entre módulos';
+    if (notaModuloAtual !== null && notaModuloAnterior !== null) {
+      if (notaModuloAtual > notaModuloAnterior) {
+        evolucaoAcademicaLabel = `Evolução positiva (${notaModuloAnterior} → ${notaModuloAtual})`;
+      } else if (notaModuloAtual < notaModuloAnterior) {
+        evolucaoAcademicaLabel = `Oscilação/queda (${notaModuloAnterior} → ${notaModuloAtual})`;
+      } else {
+        evolucaoAcademicaLabel = `Estabilidade (${notaModuloAtual})`;
+      }
+    } else if (ultimaNota !== null) {
+      evolucaoAcademicaLabel = `Nota registrada: ${ultimaNota}`;
+    }
+
     consolidatedCandidates.push({
       studentKey,
       primaryRecordId: primary.id,
@@ -4288,8 +4402,15 @@ export function computeDashboardAnalytics(
       isAula4SemApostilaFinEmDia,
       isDesafioApostilaPedagogico,
       isDesafioApostilaFinanceiro,
+      isPossivelDesistencia: isPossivelDesistenciaFlag,
       isPresencaSemRespostaNps,
       schedules,
+      ultimaNota,
+      ultimaNotaObtida: ultimaNota,
+      notaModuloAtual,
+      notaModuloAnterior,
+      evolucaoAcademicaLabel,
+      parcelasAtrasadasMax,
     });
   }
 
@@ -4488,11 +4609,13 @@ export function computeDashboardSummaryMetricsFromStudents(
   students: ConsolidatedDashboardStudent[]
 ): DashboardSummaryMetrics {
   const totalAlunos = students.length;
+  const formacoesAtivasCount = totalAlunos;
   let totalAgendamentosFiltrados = 0;
   let apostilaEntregueCount = 0;
   let apostilaNaoEntregueCount = 0;
   let desafioApostilaPedagogicoCount = 0;
   let desafioApostilaFinanceiroCount = 0;
+  let possiveisDesistenciasCount = 0;
   let presencaRegistrosCount = 0;
   let faltaRegistrosCount = 0;
   let alunosComPresencaCount = 0;
@@ -4505,8 +4628,9 @@ export function computeDashboardSummaryMetricsFromStudents(
   let aula4SemApostilaFinEmDiaCount = 0;
   let presencaSemRespostaNpsCount = 0;
 
-  // Acumulador de presenças e faltas por dia da semana para calcular a Frequência da Semana
-  // como a MÉDIA DE FREQUÊNCIA DE CADA DIA contabilizado (assim que for contabilizando)
+  // Unificação de alunos ativos únicos (quem tem mais de um contrato ou mais de uma formação conta uma única vez — Seção 4.2)
+  const uniqueActiveStudentsSet = new Set<string>();
+
   const dailyAttendanceByWeekday = new Map<
     string,
     { presencas: number; faltas: number }
@@ -4514,6 +4638,12 @@ export function computeDashboardSummaryMetricsFromStudents(
 
   for (const st of students) {
     totalAgendamentosFiltrados += st.schedules.length;
+
+    const unifiedStudentIdentity =
+      normalizeStudentName(st.nomeCompleto) || st.contrato || st.studentKey;
+    if (unifiedStudentIdentity) {
+      uniqueActiveStudentsSet.add(unifiedStudentIdentity);
+    }
 
     if (st.possuiApostila) {
       apostilaEntregueCount++;
@@ -4524,6 +4654,10 @@ export function computeDashboardSummaryMetricsFromStudents(
       } else {
         desafioApostilaPedagogicoCount++;
       }
+    }
+
+    if (isPossivelDesistencia(st)) {
+      possiveisDesistenciasCount++;
     }
 
     presencaRegistrosCount += st.presencaCount;
@@ -4557,6 +4691,8 @@ export function computeDashboardSummaryMetricsFromStudents(
     if (st.isPresencaSemRespostaNps) presencaSemRespostaNpsCount++;
   }
 
+  const alunosAtivosUnicosCount = uniqueActiveStudentsSet.size;
+
   const apostilaPercentualEntrega =
     totalAlunos > 0
       ? Number(((apostilaEntregueCount / totalAlunos) * 100).toFixed(1))
@@ -4582,24 +4718,23 @@ export function computeDashboardSummaryMetricsFromStudents(
         )
       : 0;
 
-  // Cálculo da Frequência da Semana: média das frequências diárias dos dias já contabilizados
-  const dailyFrequencyPercentages: number[] = [];
+  const possiveisDesistenciasPercent =
+    totalAlunos > 0
+      ? Number(((possiveisDesistenciasCount / totalAlunos) * 100).toFixed(1))
+      : 0;
+
+  let diasContabilizadosFrequenciaCount = 0;
   for (const { presencas, faltas } of dailyAttendanceByWeekday.values()) {
-    const dayBase = presencas + faltas;
-    if (dayBase > 0) {
-      dailyFrequencyPercentages.push((presencas / dayBase) * 100);
+    if (presencas + faltas > 0) {
+      diasContabilizadosFrequenciaCount++;
     }
   }
 
-  const diasContabilizadosFrequenciaCount = dailyFrequencyPercentages.length;
-  const hasFrequencyDataFlag = diasContabilizadosFrequenciaCount > 0;
+  // Fonte única de cálculo de frequência para todo o sistema: Presenças / (Presenças + Faltas) (Seção 5.3)
+  const totalBaseFrequencia = presencaRegistrosCount + faltaRegistrosCount;
+  const hasFrequencyDataFlag = totalBaseFrequencia > 0;
   const frequenciaPercentual = hasFrequencyDataFlag
-    ? Number(
-        (
-          dailyFrequencyPercentages.reduce((acc, val) => acc + val, 0) /
-          diasContabilizadosFrequenciaCount
-        ).toFixed(1)
-      )
+    ? Number(((presencaRegistrosCount / totalBaseFrequencia) * 100).toFixed(1))
     : 0;
 
   const financeiroEmDiaPercent =
@@ -4618,6 +4753,8 @@ export function computeDashboardSummaryMetricsFromStudents(
 
   return {
     totalAlunos,
+    formacoesAtivasCount,
+    alunosAtivosUnicosCount,
     totalAgendamentosFiltrados,
     apostilaEntregueCount,
     apostilaNaoEntregueCount,
@@ -4627,6 +4764,8 @@ export function computeDashboardSummaryMetricsFromStudents(
     desafioApostilaFinanceiroCount,
     desafioApostilaPedagogicoPercent,
     desafioApostilaFinanceiroPercent,
+    possiveisDesistenciasCount,
+    possiveisDesistenciasPercent,
     presencaRegistrosCount,
     faltaRegistrosCount,
     alunosComPresencaCount,
@@ -4657,6 +4796,7 @@ const DESAFIO_APOSTILA_GROUP_CARDS: DashboardCardSelectionType[] = [
   'DESAFIO_APOSTILA_PEDAGOGICO',
   'DESAFIO_APOSTILA_FINANCEIRO',
   'DESAFIO_APOSTILA_TODOS',
+  'POSSIVEIS_DESISTENCIAS',
 ];
 
 const FREQUENCIA_GROUP_CARDS: DashboardCardSelectionType[] = [
@@ -4676,13 +4816,6 @@ const CATEGORIA_GROUP_CARDS: DashboardCardSelectionType[] = [
   'CATEGORIA_PROFISSIONALIZANTE',
 ];
 
-/**
- * Alterna (marca/desmarca) um card ou sub-opção na seleção múltipla de cards do Dashboard.
- * - Clicar em 'TOTAL_ALUNOS' limpa as seleções ativas para exibir todos os alunos.
- * - Clicar em um item já selecionado desmarca-o.
- * - Clicar em uma sub-opção mutuamente exclusiva do mesmo card substitui apenas a sub-opção daquele card,
- *   preservando todos os demais cards selecionados.
- */
 export function toggleDashboardCardSelection(
   currentSelections: DashboardCardSelectionType[],
   clicked: DashboardCardSelectionType
@@ -4719,40 +4852,44 @@ export function getCardSelectionLabel(sel: DashboardCardSelectionType): string {
     case 'APOSTILA_ENTREGUE':
       return 'Apostila Entregue';
     case 'APOSTILA_PENDENTE':
-      return 'Apostila Não Entregue';
+      return 'Sem Apostila';
     case 'APOSTILA_TODOS':
-      return 'Entrega de Apostila';
+      return 'Apostila';
+    case 'POSSIVEIS_DESISTENCIAS':
+      return 'Possíveis Desistências';
     case 'DESAFIO_APOSTILA_PEDAGOGICO':
-      return 'Causa Pedagógica (Fin. em Dia s/ Apostila)';
+      return 'Sem Apostila (Fin. em Dia)';
     case 'DESAFIO_APOSTILA_FINANCEIRO':
-      return 'Causa Financeira (Em Atraso s/ Apostila)';
+      return 'Sem Apostila (Fin. em Atraso)';
     case 'DESAFIO_APOSTILA_TODOS':
-      return 'Desafio na Entrega de Apostila';
+      return 'Sem Apostila';
     case 'FREQUENCIA_PRESENCA':
       return 'Com Presença';
     case 'FREQUENCIA_FALTA':
       return 'Com Falta';
     case 'FREQUENCIA_TODOS':
-      return 'Com Frequência Registrada';
+      return 'Frequência';
     case 'FINANCEIRO_EM_DIA':
       return 'Financeiro em Dia';
     case 'FINANCEIRO_EM_ATRASO':
       return 'Financeiro em Atraso';
     case 'FINANCEIRO_TODOS':
-      return 'Situação Financeira';
+      return 'Financeiro';
     case 'CATEGORIA_INGLES':
       return 'Inglês';
     case 'CATEGORIA_PROFISSIONALIZANTE':
       return 'Profissionalizante';
     case 'EVASAO':
-      return 'Evasões da Semana';
+      return 'Evasão';
     case 'AULA_4_SEM_APOSTILA_FIN_EM_DIA':
-      return '3+ Aulas s/ Apostila e Fin. em Dia';
+      return '3+ Aulas s/ Apostila';
     case 'PRESENCA_SEM_RESPOSTA_NPS':
-      return 'Presença s/ Resposta NPS';
+      return 'Presença s/ NPS';
+    case 'ALUNOS_ATIVOS_UNICOS':
+      return 'Alunos Ativos';
     case 'TOTAL_ALUNOS':
     default:
-      return 'Todos os Alunos';
+      return 'Formações Ativas';
   }
 }
 
@@ -4760,8 +4897,11 @@ export function filterDashboardStudentsByCardSelections(
   students: ConsolidatedDashboardStudent[],
   selections: DashboardCardSelectionType[]
 ): ConsolidatedDashboardStudent[] {
-  const active = selections.filter((s) => s !== 'TOTAL_ALUNOS');
-  if (active.length === 0) {
+  const unifyUniqueStudents = selections.includes('ALUNOS_ATIVOS_UNICOS');
+  const active = selections.filter(
+    (s) => s !== 'TOTAL_ALUNOS' && s !== 'ALUNOS_ATIVOS_UNICOS'
+  );
+  if (active.length === 0 && !unifyUniqueStudents) {
     return students;
   }
 
@@ -4770,6 +4910,7 @@ export function filterDashboardStudentsByCardSelections(
   const hasApostilaEntregue = activeSet.has('APOSTILA_ENTREGUE');
   const hasApostilaPendente = activeSet.has('APOSTILA_PENDENTE');
 
+  const hasPossiveisDesistencias = activeSet.has('POSSIVEIS_DESISTENCIAS');
   const hasDesafioPedagogico = activeSet.has('DESAFIO_APOSTILA_PEDAGOGICO');
   const hasDesafioFinanceiro = activeSet.has('DESAFIO_APOSTILA_FINANCEIRO');
   const hasDesafioTodos = activeSet.has('DESAFIO_APOSTILA_TODOS');
@@ -4789,10 +4930,11 @@ export function filterDashboardStudentsByCardSelections(
   const hasPresencaSemNps = activeSet.has('PRESENCA_SEM_RESPOSTA_NPS');
   const hasAnySpecialAlertCard = hasEvasao || hasAula4 || hasPresencaSemNps;
 
-  return students.filter((s) => {
+  const filteredList = students.filter((s) => {
     if (hasApostilaEntregue && !s.possuiApostila) return false;
     if (hasApostilaPendente && s.possuiApostila) return false;
 
+    if (hasPossiveisDesistencias && !isPossivelDesistencia(s)) return false;
     if (hasDesafioPedagogico && !s.isDesafioApostilaPedagogico) return false;
     if (hasDesafioFinanceiro && !s.isDesafioApostilaFinanceiro) return false;
     if (hasDesafioTodos && s.possuiApostila) return false;
@@ -4817,6 +4959,24 @@ export function filterDashboardStudentsByCardSelections(
 
     return true;
   });
+
+  if (!unifyUniqueStudents) {
+    return filteredList;
+  }
+
+  const seenStudentIdentities = new Set<string>();
+  const deduplicated: ConsolidatedDashboardStudent[] = [];
+  for (const st of filteredList) {
+    const unifiedStudentIdentity =
+      normalizeStudentName(st.nomeCompleto || '') ||
+      (st.contratos[0] || st.contrato || '').trim();
+    if (!unifiedStudentIdentity || seenStudentIdentities.has(unifiedStudentIdentity)) {
+      continue;
+    }
+    seenStudentIdentities.add(unifiedStudentIdentity);
+    deduplicated.push(st);
+  }
+  return deduplicated;
 }
 
 export function filterDashboardStudentsByCardSelection(
@@ -4828,6 +4988,436 @@ export function filterDashboardStudentsByCardSelection(
   }
   return filterDashboardStudentsByCardSelections(students, [selection]);
 }
+
+// ============================================================================
+// MÓDULO 1.3 — PRIORIZAÇÃO DA PESQUISA NO PORTAL DO ALUNO
+// ============================================================================
+
+export interface PortalNpsPriorityCheckResult {
+  shouldDisplay: boolean;
+  shouldShowModal: boolean;
+  shouldDisplayModal: boolean;
+  greetingMessage: string;
+  targetInvitation: ActiveNpsInvitation | null;
+  invitation: ActiveNpsInvitation | null;
+  reason?: string;
+}
+
+/**
+ * Avalia estritamente as 5 condições da seção 1.3 para apresentar o modal
+ * prioritário de avaliação NPS durante o acesso do aluno ao Portal do Aluno:
+ * 1. Exista pesquisa NPS pendente vinculada ao aluno;
+ * 2. A pesquisa pertença a um ciclo válido;
+ * 3. A prioridade tenha sido habilitada para esse ciclo (priorizarNpsNoLogin === true);
+ * 4. A pesquisa ainda não tenha sido respondida;
+ * 5. Não exista outra pesquisa prioritária aberta na mesma sessão.
+ */
+export function evaluatePortalNpsPriorityOnLogin(
+  paramsOrContrato:
+    | {
+        studentName: string;
+        contrato: string;
+        invitations: ActiveNpsInvitation[];
+        isAnotherPriorityModalOpenInSession?: boolean;
+        hasAnotherPriorityModalOpenInSession?: boolean;
+        answeredInviteIdsInSession?: Set<string> | string[];
+      }
+    | string,
+  studentNameArg?: string,
+  invitationsArg?: ActiveNpsInvitation[],
+  isAnotherPriorityModalOpenArg?: boolean
+): PortalNpsPriorityCheckResult {
+  const normalizedParams =
+    typeof paramsOrContrato === 'string'
+      ? {
+          contrato: paramsOrContrato,
+          studentName: studentNameArg || '',
+          invitations: invitationsArg || [],
+          isAnotherPriorityModalOpenInSession: Boolean(
+            isAnotherPriorityModalOpenArg
+          ),
+          answeredInviteIdsInSession: [] as string[],
+        }
+      : {
+          contrato: paramsOrContrato.contrato,
+          studentName: paramsOrContrato.studentName,
+          invitations: paramsOrContrato.invitations,
+          isAnotherPriorityModalOpenInSession: Boolean(
+            paramsOrContrato.isAnotherPriorityModalOpenInSession ??
+              paramsOrContrato.hasAnotherPriorityModalOpenInSession
+          ),
+          answeredInviteIdsInSession:
+            paramsOrContrato.answeredInviteIdsInSession || [],
+        };
+
+  const {
+    studentName,
+    contrato,
+    invitations,
+    isAnotherPriorityModalOpenInSession,
+    answeredInviteIdsInSession,
+  } = normalizedParams;
+
+  const cleanName = (studentName || '').trim() || 'Aluno';
+  const greetingMessage = `Olá, ${cleanName}! Sua opinião é fundamental para a Microlins. Avalie sua experiência em apenas 15 segundos.`;
+
+  if (isAnotherPriorityModalOpenInSession) {
+    return {
+      shouldDisplay: false,
+      shouldShowModal: false,
+      shouldDisplayModal: false,
+      greetingMessage,
+      targetInvitation: null,
+      invitation: null,
+      reason: 'ANOTHER_PRIORITY_MODAL_OPEN_IN_SESSION',
+    };
+  }
+
+  const answeredSet =
+    answeredInviteIdsInSession instanceof Set
+      ? answeredInviteIdsInSession
+      : new Set(answeredInviteIdsInSession);
+
+  const normTargetName = normalizeStudentName(cleanName);
+  const cleanContrato = (contrato || '').trim();
+
+  // Localiza convites vinculados ao aluno (por contrato ou nome normalizado)
+  const studentInvites = (invitations || []).filter((inv) => {
+    const matchesContrato =
+      cleanContrato && inv.contrato && inv.contrato.trim() === cleanContrato;
+    const matchesName =
+      normTargetName &&
+      normalizeStudentName(inv.studentName || '') === normTargetName;
+    return Boolean(matchesContrato || matchesName);
+  });
+
+  if (studentInvites.length === 0) {
+    return {
+      shouldDisplay: false,
+      shouldShowModal: false,
+      shouldDisplayModal: false,
+      greetingMessage,
+      targetInvitation: null,
+      invitation: null,
+      reason: 'NO_SURVEY_FOR_STUDENT',
+    };
+  }
+
+  // Filtra convites com prioridade habilitada, ciclo válido e ainda não respondidos
+  const prioritizedPending = studentInvites.find((inv) => {
+    const isAnswered =
+      Boolean(inv.answered) ||
+      inv.invitationStatus === 'respondido' ||
+      answeredSet.has(inv.id);
+    if (isAnswered) return false;
+    if (inv.invitationStatus !== 'ativo') return false;
+    if (!inv.pontoJornada || inv.pontoJornada.trim().length === 0) return false;
+    if (!inv.priorizarNpsNoLogin) return false;
+    if (
+      inv.cicloPriorizado &&
+      inv.cicloPriorizado.trim() !== '' &&
+      inv.cicloPriorizado.trim().toLowerCase() !==
+        inv.pontoJornada.trim().toLowerCase()
+    ) {
+      return false;
+    }
+    return true;
+  });
+
+  if (!prioritizedPending) {
+    return {
+      shouldDisplay: false,
+      shouldShowModal: false,
+      shouldDisplayModal: false,
+      greetingMessage,
+      targetInvitation: null,
+      invitation: null,
+      reason: 'NO_PRIORITIZED_PENDING_SURVEY_IN_VALID_CYCLE',
+    };
+  }
+
+  return {
+    shouldDisplay: true,
+    shouldShowModal: true,
+    shouldDisplayModal: true,
+    greetingMessage,
+    targetInvitation: prioritizedPending,
+    invitation: prioritizedPending,
+  };
+}
+
+// ============================================================================
+// MÓDULO 2 — OBRIGATORIEDADE DO COMENTÁRIO QUALITATIVO & ORIENTAÇÃO CONTEXTUAL
+// ============================================================================
+
+export interface QualitativeNpsCommentValidationResult {
+  valid: boolean;
+  isValid: boolean;
+  normalizedText: string;
+  validCharsCount: number;
+  validCharCount: number;
+  faltamCaracteres: number;
+  missingChars: number;
+  meaningfulWordsCount: number;
+  meaningfulWordCount: number;
+  missingWords: number;
+  isArtificial: boolean;
+  isArtificialSequence: boolean;
+  errorReason: string | null;
+  errorMessage: string | null;
+  counterText: string;
+  dynamicCounterText: string;
+  counterLabel: string;
+}
+
+/**
+ * Normaliza o texto removendo espaços iniciais, finais e duplicados antes da validação.
+ */
+export function normalizeQualitativeNpsComment(rawText: string): string {
+  return String(rawText || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Orientação contextual (placeholder dinâmico) conforme a faixa da nota (Seção 2.3):
+ * - Notas 9 e 10 (Promotores)
+ * - Notas 7 e 8 (Neutros)
+ * - Notas 0 a 6 (Detratores)
+ */
+export function getNpsContextualPlaceholder(score: number | null | undefined): string {
+  if (score === null || score === undefined || Number.isNaN(score)) {
+    return 'Selecione uma nota de 0 a 10 acima e conte-nos detalhadamente sobre sua experiência na unidade.';
+  }
+  if (score >= 9) {
+    return 'Que bom! Conte-nos o que você mais gostou nas aulas, nos professores ou no atendimento da escola.';
+  }
+  if (score >= 7) {
+    return 'O que podemos melhorar para transformar sua experiência em uma nota 10?';
+  }
+  return 'Sentimos muito pela sua experiência. Conte-nos detalhadamente o que aconteceu para que nossa coordenação possa entender a situação e buscar uma solução.';
+}
+
+export function getNpsDynamicCommentPlaceholder(
+  score: number | null | undefined
+): {
+  band: 'PROMOTOR' | 'NEUTRO' | 'DETRATOR' | 'SEM_NOTA';
+  placeholder: string;
+  label: string;
+} {
+  if (score === null || score === undefined || Number.isNaN(score)) {
+    return {
+      band: 'SEM_NOTA',
+      placeholder: getNpsContextualPlaceholder(null),
+      label: 'Selecione uma nota de 0 a 10',
+    };
+  }
+  if (score >= 9) {
+    return {
+      band: 'PROMOTOR',
+      placeholder:
+        'Que excelente! Conte para nós o que você mais gosta nas aulas, no atendimento ou na estrutura da escola.',
+      label: 'Promotor (9–10)',
+    };
+  }
+  if (score >= 7) {
+    return {
+      band: 'NEUTRO',
+      placeholder:
+        'Obrigado pela avaliação! O que podemos melhorar para que sua experiência seja nota 10?',
+      label: 'Neutro (7–8)',
+    };
+  }
+  return {
+    band: 'DETRATOR',
+    placeholder:
+      'Sentimos muito que sua experiência não tenha sido ideal. Conte-nos o que aconteceu para que possamos resolver rapidamente.',
+    label: 'Detrator (0–6)',
+  };
+}
+
+/**
+ * Detecta preenchimentos artificiais como caracteres repetidos ("aaaaaaaaaa"),
+ * sequências numéricas ou de teclado ("123456", "asdasd", "qwerty") ou repetição
+ * excessiva da mesma palavra ("teste teste teste").
+ */
+export function isArtificialNpsComment(normalizedText: string): {
+  artificial: boolean;
+  reason: string | null;
+} {
+  const clean = normalizeQualitativeNpsComment(normalizedText);
+  if (!clean) {
+    return { artificial: false, reason: null };
+  }
+
+  const compactNoSpaces = clean.replace(/\s+/g, '').toLowerCase();
+
+  // 1. Repetição contínua do mesmo caractere (ex.: "aaaaaaaaaa", "kkkkkk", "111111")
+  if (/([a-z0-9À-ÿ])\1{4,}/i.test(compactNoSpaces)) {
+    return {
+      artificial: true,
+      reason:
+        'Comentário inválido: evite repetir o mesmo caractere consecutivamente (ex.: "aaaaaaaaaa").',
+    };
+  }
+
+  // Pouca variedade de caracteres em todo o texto (ex.: "ababababab")
+  const uniqueChars = new Set(compactNoSpaces.split(''));
+  if (compactNoSpaces.length >= 6 && uniqueChars.size <= 2) {
+    return {
+      artificial: true,
+      reason:
+        'Comentário inválido: o texto informado possui caracteres repetitivos sem conteúdo significativo.',
+    };
+  }
+
+  // 2. Sequências numéricas ou de teclado conhecidas ("123456", "asdasd", "qwerty", "abcdef")
+  const artificialPatterns = [
+    /12345\d*/,
+    /01234\d*/,
+    /98765\d*/,
+    /654321/,
+    /(?:asd){2,}/i,
+    /(?:qwe){2,}/i,
+    /(?:zxc){2,}/i,
+    /qwerty/i,
+    /asdfgh/i,
+    /zxcvbn/i,
+    /abcdef/i,
+    /^(?:[0-9]+\s*)+$/,
+  ];
+
+  for (const regex of artificialPatterns) {
+    if (regex.test(clean) || regex.test(compactNoSpaces)) {
+      return {
+        artificial: true,
+        reason:
+          'Comentário inválido: sequências numéricas ou de teclado (ex.: "123456", "asdasd") não são permitidas.',
+      };
+    }
+  }
+
+  // 3. Repetição excessiva da mesma palavra (ex.: "teste teste teste", "bom bom bom")
+  const words = clean
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (words.length >= 3) {
+    const wordCounts = new Map<string, number>();
+    for (const w of words) {
+      wordCounts.set(w, (wordCounts.get(w) || 0) + 1);
+    }
+    const uniqueWordCount = wordCounts.size;
+    const maxSingleWordCount = Math.max(...Array.from(wordCounts.values()));
+
+    if (
+      uniqueWordCount === 1 ||
+      (words.length <= 6 && maxSingleWordCount >= 3) ||
+      uniqueWordCount / words.length < 0.5
+    ) {
+      return {
+        artificial: true,
+        reason:
+          'Comentário inválido: evite repetir a mesma palavra várias vezes (ex.: "teste teste teste").',
+      };
+    }
+  }
+
+  return { artificial: false, reason: null };
+}
+
+/**
+ * Valida obrigatoriedade e qualidade do comentário qualitativo (Seções 2.1 e 2.2):
+ * - Mínimo de 10 caracteres válidos (desconsiderando espaços iniciais, finais e duplicados);
+ * - Mínimo de 3 palavras significativas;
+ * - Bloqueio de preenchimento artificial.
+ */
+export function validateQualitativeNpsComment(
+  rawText: string,
+  _score?: number | null
+): QualitativeNpsCommentValidationResult {
+  const normalizedText = normalizeQualitativeNpsComment(rawText);
+  const validCharsCount = normalizedText.length;
+  const faltamCaracteres = Math.max(0, 10 - validCharsCount);
+  const counterText = `Mínimo de 10 caracteres e 3 palavras. Faltam ${faltamCaracteres} caracteres.`;
+
+  // Extrai palavras significativas (tokens com pelo menos 2 caracteres alfanuméricos ou palavras válidas)
+  const rawTokens = normalizedText
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const meaningfulWords = rawTokens.filter((token) => {
+    const cleanToken = token.trim();
+    if (cleanToken.length < 2) return false;
+    // Rejeita tokens de um único caractere repetido como "aaa" ou "111"
+    if (/^([a-z0-9À-ÿ])\1+$/i.test(cleanToken)) return false;
+    return true;
+  });
+
+  const meaningfulWordsCount = meaningfulWords.length;
+  const missingWords = Math.max(0, 3 - meaningfulWordsCount);
+  const artificialCheck = isArtificialNpsComment(normalizedText);
+
+  const buildResult = (
+    valid: boolean,
+    isArtificial: boolean,
+    errorReason: string | null
+  ): QualitativeNpsCommentValidationResult => ({
+    valid,
+    isValid: valid,
+    normalizedText,
+    validCharsCount,
+    validCharCount: validCharsCount,
+    faltamCaracteres: valid ? 0 : faltamCaracteres,
+    missingChars: valid ? 0 : faltamCaracteres,
+    meaningfulWordsCount,
+    meaningfulWordCount: meaningfulWordsCount,
+    missingWords: valid ? 0 : missingWords,
+    isArtificial,
+    isArtificialSequence: isArtificial,
+    errorReason,
+    errorMessage: errorReason,
+    counterText,
+    dynamicCounterText: counterText,
+    counterLabel: counterText,
+  });
+
+  if (validCharsCount === 0) {
+    return buildResult(
+      false,
+      false,
+      'O comentário qualitativo é obrigatório para o envio da avaliação.'
+    );
+  }
+
+  if (artificialCheck.artificial) {
+    return buildResult(false, true, artificialCheck.reason);
+  }
+
+  if (validCharsCount < 10) {
+    return buildResult(
+      false,
+      false,
+      `O comentário deve conter no mínimo 10 caracteres válidos (faltam ${faltamCaracteres}).`
+    );
+  }
+
+  if (meaningfulWordsCount < 3) {
+    return buildResult(
+      false,
+      false,
+      `O comentário deve conter no mínimo 3 palavras significativas (atual: ${meaningfulWordsCount}).`
+    );
+  }
+
+  return buildResult(true, false, null);
+}
+
+export const validateNpsQualitativeComment = validateQualitativeNpsComment;
+
 
 
 

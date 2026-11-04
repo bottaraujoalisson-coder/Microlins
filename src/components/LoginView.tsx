@@ -13,13 +13,11 @@ import {
   Sun,
 } from 'lucide-react';
 import {
-  authenticatePlatformLogin,
   AuthSession,
   RegisteredSchool,
 } from '../utils/authRegistry';
 import {
   authenticateUserInSupabase,
-  recordAuditLogInSupabase,
 } from '../utils/supabaseClient';
 
 const REMEMBERED_LOGIN_STORAGE_KEY = 'microlins_remembered_login';
@@ -104,14 +102,6 @@ export const LoginView: React.FC<LoginViewProps> = ({
         : null;
 
       if (response.ok && data?.ok && data.session) {
-        recordAuditLogInSupabase({
-          actorLogin: data.session.login,
-          actorRole: data.session.role,
-          action: 'AUTH_LOGIN_SUCCESS',
-          resource: 'auth/login',
-          status: 'SUCCESS',
-          details: `Login autenticado com sucesso (${data.session.nomeCompleto}).`,
-        }).catch(() => {});
         onLoginSuccess(data.session, data.metadata);
         return;
       }
@@ -140,26 +130,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
         return;
       }
 
-      const localResult = authenticatePlatformLogin(
-        schools,
-        cleanLogin,
-        cleanSenha
-      );
-      if (localResult.ok && localResult.session) {
-        onLoginSuccess(localResult.session, {
-          unidade: localResult.school?.nome,
-          codigoUnidade: localResult.school?.codigoPortal,
-          usuarioLogin: localResult.user?.login,
-          usuarioNomeCompleto: localResult.user?.nomeCompleto,
-          usuarioCargo: localResult.user?.cargo,
-        });
-        return;
-      }
-
       setErrorMessage(
         data?.error ||
           supaResult.error ||
-          localResult.error ||
           'Credenciais inválidas: verifique seu login e senha.'
       );
     } catch {
@@ -178,25 +151,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
         return;
       }
 
-      const localResult = authenticatePlatformLogin(
-        schools,
-        cleanLogin,
-        cleanSenha
-      );
-      if (localResult.ok && localResult.session) {
-        onLoginSuccess(localResult.session, {
-          unidade: localResult.school?.nome,
-          codigoUnidade: localResult.school?.codigoPortal,
-          usuarioLogin: localResult.user?.login,
-          usuarioNomeCompleto: localResult.user?.nomeCompleto,
-          usuarioCargo: localResult.user?.cargo,
-        });
-        return;
-      }
       setErrorMessage(
         supaResult.error ||
-          localResult.error ||
-          'Credenciais inválidas: verifique seu login e senha.'
+          'Falha de comunicação com o servidor ou credenciais incorretas.'
       );
     } finally {
       setIsSubmitting(false);
@@ -275,15 +232,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
               <img
                 src="/assets/aistudio/logo-microlins_6400203f.png"
                 alt="Microlins"
-                className="h-11 w-auto object-contain"
+                className="h-11 w-auto object-contain dark:brightness-0 dark:invert"
                 data-testid="login-logo-image"
               />
               <h1 className="mt-4 text-base font-bold tracking-tight text-slate-900 dark:text-white">
                 Acesso ao Sistema da Unidade
               </h1>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                Entre com suas credenciais da escola ou da administração
-              </p>
             </div>
 
             {errorMessage && (

@@ -9,16 +9,49 @@ const ARGON2_TIME_COST = 3; // 3 iterações
 const ARGON2_PARALLELISM = 1;
 const ARGON2_HASH_LEN = 32;
 
-// Chave mestra derivada para criptografia autenticada de credenciais de integração externa
-const MASTER_KEY_MATERIAL =
-  (typeof process !== 'undefined' &&
-    process.env &&
-    (process.env.APP_ENCRYPTION_KEY || process.env.MICROLINS_SECRET_KEY)) ||
-  'microlins-grupo-realizar-aes256-gcm-institutional-key-2026';
+export function ensureNodeEnvLoaded(): void {
+  if (typeof process === 'undefined' || !process.env) return;
+  if (process.env.APP_ENCRYPTION_KEY && process.env.VITE_SUPABASE_URL) return;
+  try {
+    const getBuiltin = (process as unknown as { getBuiltinModule?: (id: string) => any }).getBuiltinModule;
+    const fs = getBuiltin ? getBuiltin('node:fs') : null;
+    const path = getBuiltin ? getBuiltin('node:path') : null;
+    if (fs && path) {
+      const envPath = path.resolve(process.cwd(), '.env');
+      if (fs.existsSync(envPath)) {
+        const lines = fs.readFileSync(envPath, 'utf-8').split(/\r?\n/);
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith('#')) continue;
+          const eqIdx = trimmed.indexOf('=');
+          if (eqIdx > 0) {
+            const key = trimmed.slice(0, eqIdx).trim();
+            const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+            if (!process.env[key]) {
+              process.env[key] = val;
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore in browser environment
+  }
+}
+
+ensureNodeEnvLoaded();
+
 
 function getEncryptionKeyBytes(): Uint8Array {
-  return sha256(utf8ToBytes(MASTER_KEY_MATERIAL));
+  ensureNodeEnvLoaded();
+  const keyMaterial =
+    (typeof process !== 'undefined' &&
+      process.env &&
+      (process.env.APP_ENCRYPTION_KEY || process.env.MICROLINS_MASTER_KEY || process.env.MICROLINS_SECRET_KEY)) ||
+    'env-runtime-derived-key';
+  return sha256(utf8ToBytes(keyMaterial));
 }
+
 
 function getRandomBytes(length: number): Uint8Array {
   const bytes = new Uint8Array(length);

@@ -31,7 +31,9 @@ import {
   Users,
   X,
 } from 'lucide-react';
-import { ModalityType } from '../data/microlinsData';
+import {
+  ActiveNpsInvitation,
+} from '../data/microlinsData';
 import {
   buildMultiLevelGroups,
   collectAllGroupKeys,
@@ -68,6 +70,8 @@ import {
 interface DashboardViewProps {
   allEvaluatedRecords: EvaluatedStudentRecord[];
   onSelectStudentRecord: (recordId: number) => void;
+  activeNpsInvitations?: ActiveNpsInvitation[];
+  onMaterialCauseUpdated?: (contrato: string, causa: string) => void;
 }
 
 const DASHBOARD_WEEKDAYS = [
@@ -134,7 +138,12 @@ const COLUMN_TEST_ID_SUFFIX: Record<ConsolidatedColumnId, string> = {
 };
 
 export const DashboardView: React.FC<DashboardViewProps> = React.memo(
-  ({ allEvaluatedRecords, onSelectStudentRecord }) => {
+  ({
+    allEvaluatedRecords,
+    onSelectStudentRecord,
+    activeNpsInvitations = [],
+    onMaterialCauseUpdated,
+  }) => {
     const [filters, setFilters] = useState<DashboardFilterCriteria>(
       DEFAULT_DASHBOARD_FILTERS
     );
@@ -231,29 +240,41 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
     // Consolidação completa (sem filtros) para permitir exportação de todos os dados
     const allUnfilteredAnalytics = useMemo(
       () =>
-        computeDashboardAnalytics(allEvaluatedRecords, {
-          ...DEFAULT_DASHBOARD_FILTERS,
-          sortBy: filters.sortBy,
-          sortDir: filters.sortDir,
-        }),
-      [allEvaluatedRecords, filters.sortBy, filters.sortDir]
+        computeDashboardAnalytics(
+          allEvaluatedRecords,
+          {
+            ...DEFAULT_DASHBOARD_FILTERS,
+            sortBy: filters.sortBy,
+            sortDir: filters.sortDir,
+          },
+          activeNpsInvitations
+        ),
+      [
+        allEvaluatedRecords,
+        filters.sortBy,
+        filters.sortDir,
+        activeNpsInvitations,
+      ]
     );
 
     // Consolidação semanal com separação exclusiva por Formação do Aluno + filtros de cabeçalho
     const { filteredStudents } = useMemo(
-      () => computeDashboardAnalytics(allEvaluatedRecords, filters),
-      [allEvaluatedRecords, filters]
+      () =>
+        computeDashboardAnalytics(
+          allEvaluatedRecords,
+          filters,
+          activeNpsInvitations
+        ),
+      [allEvaluatedRecords, filters, activeNpsInvitations]
     );
 
-    // Lista de registros correspondente à seleção múltipla de Cards + filtros de cabeçalho
-    const displayedStudents = useMemo(
-      () =>
-        filterDashboardStudentsByCardSelections(
-          filteredStudents,
-          selectedCardViews
-        ),
-      [filteredStudents, selectedCardViews]
-    );
+    // Lista de registros correspondente à seleção de Cards e filtros
+    const displayedStudents = useMemo(() => {
+      return filterDashboardStudentsByCardSelections(
+        filteredStudents,
+        selectedCardViews
+      );
+    }, [filteredStudents, selectedCardViews]);
 
     // Quantidades e percentuais dos cards atualizados dinamicamente conforme os filtros e cards selecionados
     const metrics = useMemo(
@@ -309,7 +330,6 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
         filters.frequenciaSemanal !== 'TODOS' ||
         filters.diasSemana.length > 0 ||
         filters.categoriaCurso !== 'TODOS' ||
-        filters.modalidade !== 'AMBAS' ||
         filters.horarios.length > 0 ||
         (filters.search && filters.search.trim() !== '') ||
         (filters.nomeFilter && filters.nomeFilter.trim() !== '') ||
@@ -505,10 +525,11 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
       isCardSelected('APOSTILA_ENTREGUE') ||
       isCardSelected('APOSTILA_PENDENTE');
 
-    const isDesafioApostilaCardActive =
-      isCardSelected('DESAFIO_APOSTILA_TODOS') ||
-      isCardSelected('DESAFIO_APOSTILA_PEDAGOGICO') ||
-      isCardSelected('DESAFIO_APOSTILA_FINANCEIRO');
+    const isPossiveisDesistenciasActive =
+      isCardSelected('POSSIVEIS_DESISTENCIAS');
+
+    const isAlunosAtivosUnicosActive =
+      isCardSelected('ALUNOS_ATIVOS_UNICOS');
 
     const isFrequenciaCardActive =
       isCardSelected('FREQUENCIA_TODOS') ||
@@ -522,6 +543,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
 
     const isTotalCardActive =
       selectedCardViews.length === 0 ||
+      isCardSelected('TOTAL_ALUNOS') ||
       isCardSelected('CATEGORIA_INGLES') ||
       isCardSelected('CATEGORIA_PROFISSIONALIZANTE');
 
@@ -613,20 +635,6 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
           return (
             <span className="font-sans text-xs leading-4 font-normal text-slate-700 dark:text-slate-200">
               {st.salas.join(', ')}
-            </span>
-          );
-
-        case 'modalidade':
-          return (
-            <span
-              className={`inline-flex items-center rounded border px-2 py-0.5 font-sans text-xs leading-4 font-normal whitespace-nowrap ${
-                st.modalidadesLabel.includes('On-line') &&
-                !st.modalidadesLabel.includes('Presencial')
-                  ? 'border-indigo-200 bg-indigo-50 text-indigo-800 dark:border-indigo-800/70 dark:bg-indigo-950/60 dark:text-indigo-300'
-                  : 'border-sky-200 bg-sky-50 text-[#004A8D] dark:border-sky-800/70 dark:bg-sky-950/60 dark:text-sky-300'
-              }`}
-            >
-              {st.modalidadesLabel}
             </span>
           );
 
@@ -1024,27 +1032,6 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
                   {f}
                 </option>
               ))}
-            </select>
-          );
-          break;
-
-        case 'modalidade':
-          primaryControl = (
-            <select
-              aria-label="Filtrar por Modalidade"
-              data-testid="dash-filter-modalidade"
-              value={filters.modalidade}
-              onChange={(e) =>
-                setFilters((prev) => ({
-                  ...prev,
-                  modalidade: e.target.value as 'AMBAS' | ModalityType,
-                }))
-              }
-              className="h-6 min-w-0 flex-1 rounded border border-slate-300 bg-white px-1.5 font-sans text-xs font-normal text-slate-800 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
-            >
-              <option value="AMBAS">Todas</option>
-              <option value="Presencial">Presencial</option>
-              <option value="Online">On-line</option>
             </select>
           );
           break;
@@ -1490,13 +1477,13 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
         data-testid="dashboard-view-container"
         className="flex h-full w-full flex-col gap-1.5 overflow-y-auto pr-0.5 pb-1"
       >
-        {/* SEÇÃO 1: CARDS DO CONSOLIDADO PADRONIZADOS EM 2 LINHAS E 3 COLUNAS (6 CARDS COMPACTOS) */}
+        {/* SEÇÃO 1: CARDS DE RESUMO DO CONSOLIDADO */}
         <section
-          aria-label="Indicadores principais do Consolidado (2 linhas e 3 colunas)"
+          aria-label="Indicadores de resumo do Consolidado"
           data-testid="dashboard-kpi-cards-grid"
-          className="grid shrink-0 grid-cols-3 gap-1.5"
+          className="grid shrink-0 grid-cols-2 gap-1.5 lg:grid-cols-4"
         >
-          {/* LINHA 1 - COLUNA 1: TOTAL DE ALUNOS / CATEGORIAS (SEPARAÇÃO EXCLUSIVA POR FORMAÇÃO) */}
+          {/* CARD 1: FORMAÇÕES ATIVAS */}
           <div
             data-testid="dash-card-total-alunos"
             onClick={() => handleToggleCard('TOTAL_ALUNOS')}
@@ -1508,11 +1495,11 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
           >
             <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
               <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
-                <Users className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
-                <span>Total de Alunos</span>
+                <GraduationCap className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
+                <span>Formações ativas</span>
               </span>
               <span className="text-sm font-black text-[#004A8D] tabular-nums whitespace-nowrap dark:text-sky-400">
-                {metrics.totalAlunos}
+                {metrics.formacoesAtivasCount}
               </span>
             </div>
 
@@ -1569,7 +1556,35 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             </div>
           </div>
 
-          {/* LINHA 1 - COLUNA 2: ENTREGA DE APOSTILA */}
+          {/* CARD 2: ALUNOS ATIVOS (ÚNICOS, UNIFICANDO CONTRATOS) */}
+          <div
+            data-testid="dash-card-alunos-ativos"
+            onClick={() => handleToggleCard('ALUNOS_ATIVOS_UNICOS')}
+            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-left transition-all ${
+              isAlunosAtivosUnicosActive
+                ? 'border-[#004A8D] bg-sky-50/80 ring-1 ring-[#004A8D]/25 dark:border-sky-500 dark:bg-sky-950/40'
+                : 'border-slate-200/90 bg-white hover:border-sky-300 dark:border-slate-800 dark:bg-slate-900'
+            }`}
+          >
+            <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
+              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
+                <Users className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
+                <span>Alunos ativos</span>
+              </span>
+              <span className="text-sm font-black text-[#004A8D] tabular-nums whitespace-nowrap dark:text-sky-400">
+                {metrics.alunosAtivosUnicosCount}
+              </span>
+            </div>
+
+            <div className="flex h-6 items-center justify-between rounded border border-slate-200/80 bg-slate-50/70 px-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-300">
+              <span>Contratos unificados</span>
+              <span className="font-semibold text-slate-800 tabular-nums dark:text-slate-200">
+                {metrics.alunosAtivosUnicosCount} únicos
+              </span>
+            </div>
+          </div>
+
+          {/* CARD 3: APOSTILAS */}
           <div
             data-testid="dash-card-apostila"
             onClick={() => handleToggleCard('APOSTILA_PENDENTE')}
@@ -1582,10 +1597,10 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             <div className="flex items-center justify-between gap-2 whitespace-nowrap">
               <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
                 <BookOpen className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
-                <span>Entrega de Apostila</span>
+                <span>Apostilas</span>
               </span>
               <span className="text-[11px] font-bold text-emerald-700 tabular-nums whitespace-nowrap dark:text-emerald-400">
-                {metrics.apostilaPercentualEntrega.toFixed(1)}% entregue
+                {metrics.apostilaPercentualEntrega.toFixed(1)}%
               </span>
             </div>
 
@@ -1633,7 +1648,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
                   {isCardSelected('APOSTILA_PENDENTE') && (
                     <Check className="h-2.5 w-2.5 shrink-0 text-rose-700 dark:text-rose-400" />
                   )}
-                  <span>Não entregue</span>
+                  <span>Pendente</span>
                 </span>
                 <span className="text-xs font-bold text-rose-700 tabular-nums dark:text-rose-400">
                   {metrics.apostilaNaoEntregueCount}
@@ -1642,82 +1657,35 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             </div>
           </div>
 
-          {/* LINHA 1 - COLUNA 3: DESAFIO NA ENTREGA DE APOSTILA (CAUSA PEDAGÓGICA VS CAUSA FINANCEIRA) */}
+          {/* CARD 4: POSSÍVEIS DESISTÊNCIAS */}
           <div
-            data-testid="dash-card-desafio-apostila"
-            onClick={() => handleToggleCard('DESAFIO_APOSTILA_TODOS')}
+            data-testid="dash-card-possiveis-desistencias"
+            onClick={() => handleToggleCard('POSSIVEIS_DESISTENCIAS')}
             className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 transition-all ${
-              isDesafioApostilaCardActive
-                ? 'border-[#004A8D] bg-sky-50/75 ring-1 ring-[#004A8D]/25 dark:border-sky-500 dark:bg-sky-950/35'
-                : 'border-slate-200/90 bg-white hover:border-sky-300 dark:border-slate-800 dark:bg-slate-900'
+              isPossiveisDesistenciasActive
+                ? 'border-rose-600 bg-rose-50/80 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/40'
+                : 'border-slate-200/90 bg-white hover:border-rose-300 dark:border-slate-800 dark:bg-slate-900'
             }`}
           >
             <div className="flex items-center justify-between gap-2 whitespace-nowrap">
               <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
-                <BookX className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
-                <span>Desafio na Entrega de Apostila</span>
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+                <span>Possíveis desistências</span>
               </span>
-              <span className="text-[11px] font-bold text-rose-700 tabular-nums whitespace-nowrap dark:text-rose-400">
-                {metrics.desafioApostilaTotalCount} pendentes
+              <span className="text-sm font-black text-rose-700 tabular-nums whitespace-nowrap dark:text-rose-400">
+                {metrics.possiveisDesistenciasCount}
               </span>
             </div>
 
-            <div className="grid grid-cols-2 gap-1 whitespace-nowrap">
-              <button
-                type="button"
-                data-testid="dash-sub-desafio-pedagogico"
-                aria-pressed={isCardSelected('DESAFIO_APOSTILA_PEDAGOGICO')}
-                title="Causa pedagógica: Alunos que estão com o financeiro em dia, mas não foi entregue a apostila"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleToggleCard('DESAFIO_APOSTILA_PEDAGOGICO');
-                }}
-                className={`flex h-6 items-center justify-between gap-1 rounded border px-2 text-left whitespace-nowrap transition-colors ${
-                  isCardSelected('DESAFIO_APOSTILA_PEDAGOGICO')
-                    ? 'border-[#004A8D] bg-sky-100/90 ring-1 ring-[#004A8D]/30 dark:border-sky-400 dark:bg-sky-950/80'
-                    : 'border-sky-200/80 bg-sky-50/60 hover:border-sky-400 dark:border-sky-800/60 dark:bg-sky-950/40'
-                }`}
-              >
-                <span className="flex items-center gap-1 text-[11px] font-medium text-sky-900 dark:text-sky-300">
-                  {isCardSelected('DESAFIO_APOSTILA_PEDAGOGICO') && (
-                    <Check className="h-2.5 w-2.5 shrink-0 text-[#004A8D] dark:text-sky-300" />
-                  )}
-                  <span>Causa Pedagógica</span>
-                </span>
-                <span className="text-xs font-bold text-[#004A8D] tabular-nums dark:text-sky-300">
-                  {metrics.desafioApostilaPedagogicoCount}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                data-testid="dash-sub-desafio-financeiro"
-                aria-pressed={isCardSelected('DESAFIO_APOSTILA_FINANCEIRO')}
-                title="Causa financeira: Alunos que estão com a parcela em atraso, mas não tiveram a apostila entregue"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleToggleCard('DESAFIO_APOSTILA_FINANCEIRO');
-                }}
-                className={`flex h-6 items-center justify-between gap-1 rounded border px-2 text-left whitespace-nowrap transition-colors ${
-                  isCardSelected('DESAFIO_APOSTILA_FINANCEIRO')
-                    ? 'border-amber-600 bg-amber-100/90 ring-1 ring-amber-500/30 dark:border-amber-400 dark:bg-amber-950/80'
-                    : 'border-amber-200/80 bg-amber-50/60 hover:border-amber-400 dark:border-amber-800/60 dark:bg-amber-950/35'
-                }`}
-              >
-                <span className="flex items-center gap-1 text-[11px] font-medium text-amber-900 dark:text-amber-300">
-                  {isCardSelected('DESAFIO_APOSTILA_FINANCEIRO') && (
-                    <Check className="h-2.5 w-2.5 shrink-0 text-amber-700 dark:text-amber-400" />
-                  )}
-                  <span>Causa Financeira</span>
-                </span>
-                <span className="text-xs font-bold text-amber-700 tabular-nums dark:text-amber-400">
-                  {metrics.desafioApostilaFinanceiroCount}
-                </span>
-              </button>
+            <div className="flex h-6 items-center justify-between rounded border border-rose-200/80 bg-rose-50/50 px-2 text-[10px] font-medium text-rose-900 whitespace-nowrap dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
+              <span>Fin. atraso · Sem apostila · 0% freq.</span>
+              {isPossiveisDesistenciasActive && (
+                <Check className="h-2.5 w-2.5 shrink-0 text-rose-700 dark:text-rose-300" />
+              )}
             </div>
           </div>
 
-          {/* LINHA 2 - COLUNA 1: FINANCEIRO */}
+          {/* CARD 5: FINANCEIRO */}
           <div
             data-testid="dash-card-financeiro"
             onClick={() => handleToggleCard('FINANCEIRO_EM_ATRASO')}
@@ -1733,7 +1701,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
                 <span>Financeiro</span>
               </span>
               <span className="text-[11px] font-bold text-emerald-700 tabular-nums whitespace-nowrap dark:text-emerald-400">
-                {metrics.financeiroEmDiaPercent.toFixed(1)}% em dia
+                {metrics.financeiroEmDiaPercent.toFixed(1)}%
               </span>
             </div>
 
@@ -1756,7 +1724,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
                   {isCardSelected('FINANCEIRO_EM_DIA') && (
                     <Check className="h-2.5 w-2.5 shrink-0 text-emerald-700 dark:text-emerald-400" />
                   )}
-                  <span>Em dia ({metrics.financeiroEmDiaPercent.toFixed(0)}%)</span>
+                  <span>Em dia</span>
                 </span>
                 <span className="text-xs font-bold text-emerald-700 tabular-nums dark:text-emerald-400">
                   {metrics.financeiroEmDiaCount}
@@ -1781,9 +1749,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
                   {isCardSelected('FINANCEIRO_EM_ATRASO') && (
                     <Check className="h-2.5 w-2.5 shrink-0 text-amber-700 dark:text-amber-400" />
                   )}
-                  <span>
-                    Em atraso ({metrics.financeiroEmAtrasoPercent.toFixed(0)}%)
-                  </span>
+                  <span>Em atraso</span>
                 </span>
                 <span className="text-xs font-bold text-amber-700 tabular-nums dark:text-amber-400">
                   {metrics.financeiroEmAtrasoCount}
@@ -1792,96 +1758,82 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             </div>
           </div>
 
-          {/* LINHA 2 - COLUNA 2: FREQUÊNCIA DA SEMANA & EVASÕES DA SEMANA */}
+          {/* CARD 6: FREQUÊNCIA */}
           <div
-            data-testid="dash-card-resumo-freq-evasao"
-            className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200/90 bg-white px-2 py-1.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900"
+            data-testid="dash-card-frequencia"
+            onClick={() => handleToggleCard('FREQUENCIA_TODOS')}
+            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-left transition-all ${
+              isFrequenciaCardActive
+                ? 'border-[#004A8D] bg-sky-50/80 ring-1 ring-[#004A8D]/25 dark:border-sky-500 dark:bg-sky-950/40'
+                : 'border-slate-200/90 bg-white hover:border-sky-300 dark:border-slate-800 dark:bg-slate-900'
+            }`}
           >
-            {/* Metade 1: Frequência da Semana */}
-            <button
-              type="button"
-              data-testid="dash-card-frequencia"
-              aria-pressed={isFrequenciaCardActive}
-              onClick={() => handleToggleCard('FREQUENCIA_TODOS')}
-              className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
-                isFrequenciaCardActive
-                  ? 'border-[#004A8D] bg-sky-50/90 ring-1 ring-[#004A8D]/30 dark:border-sky-400 dark:bg-sky-950/60'
-                  : 'border-slate-200/80 bg-slate-50/60 hover:border-sky-300 dark:border-slate-800 dark:bg-slate-800/50'
-              }`}
-            >
-              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
-                <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
-                  <Percent className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  <span>Frequência</span>
-                </span>
-                {isFrequenciaCardActive && (
-                  <Check className="h-2.5 w-2.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
-                )}
-              </div>
-              <div className="flex w-full items-baseline justify-between gap-1 whitespace-nowrap">
-                <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                  Média diária
-                </span>
-                <span
-                  data-testid="dash-freq-average-only"
-                  className={`text-xs font-black tabular-nums ${
-                    !metrics.hasFrequencyData
-                      ? 'text-slate-500 dark:text-slate-400'
-                      : metrics.frequenciaPercentual >= 85
-                      ? 'text-emerald-700 dark:text-emerald-400'
-                      : 'text-rose-700 dark:text-rose-400'
-                  }`}
-                >
-                  {metrics.hasFrequencyData
-                    ? `${metrics.frequenciaPercentual.toFixed(1)}%`
-                    : '0.0%'}
-                </span>
-              </div>
-            </button>
+            <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
+              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
+                <Percent className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                <span>Frequência</span>
+              </span>
+              <span
+                data-testid="dash-freq-average-only"
+                className={`text-sm font-black tabular-nums ${
+                  !metrics.hasFrequencyData
+                    ? 'text-slate-500 dark:text-slate-400'
+                    : metrics.frequenciaPercentual >= 85
+                    ? 'text-emerald-700 dark:text-emerald-400'
+                    : 'text-rose-700 dark:text-rose-400'
+                }`}
+              >
+                {metrics.hasFrequencyData
+                  ? `${metrics.frequenciaPercentual.toFixed(1)}%`
+                  : '0.0%'}
+              </span>
+            </div>
 
-            {/* Metade 2: Evasões da Semana */}
-            <button
-              type="button"
-              data-testid="dash-card-evasao"
-              aria-pressed={isCardSelected('EVASAO')}
-              onClick={() => handleToggleCard('EVASAO')}
-              className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
-                isCardSelected('EVASAO')
-                  ? 'border-rose-600 bg-rose-50/90 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/60'
-                  : 'border-rose-200/80 bg-rose-50/40 hover:border-rose-400 dark:border-rose-900/60 dark:bg-rose-950/25'
-              }`}
-            >
-              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
-                <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
-                  <AlertTriangle className="h-3 w-3 shrink-0 text-rose-600 dark:text-rose-400" />
-                  <span>Evasões</span>
-                </span>
-                <span className="text-[10px] font-bold text-rose-700 tabular-nums dark:text-rose-300">
-                  {metrics.evadidosPercent.toFixed(1)}%
-                </span>
-              </div>
-              <div className="flex w-full items-baseline justify-between gap-1 whitespace-nowrap">
-                <span className="text-[10px] text-rose-800/90 dark:text-rose-300">
-                  Semana
-                </span>
-                <span className="text-xs font-black text-rose-700 tabular-nums dark:text-rose-400">
-                  {metrics.evadidosCount} alunos
-                </span>
-              </div>
-            </button>
+            <div className="flex h-6 items-center justify-between rounded border border-slate-200/80 bg-slate-50/70 px-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-300">
+              <span>Presenças / faltas</span>
+              <span className="font-semibold text-slate-800 tabular-nums dark:text-slate-200">
+                {metrics.presencaRegistrosCount ?? 0}P · {metrics.faltaRegistrosCount ?? 0}F
+              </span>
+            </div>
           </div>
 
-          {/* LINHA 2 - COLUNA 3: 3+ AULAS SEM APOSTILA (FINANCEIRO EM DIA) & PRESENÇA SEM NPS */}
+          {/* CARD 7: EVASÕES */}
+          <div
+            data-testid="dash-card-evasao"
+            onClick={() => handleToggleCard('EVASAO')}
+            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-left transition-all ${
+              isCardSelected('EVASAO')
+                ? 'border-rose-600 bg-rose-50/80 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/40'
+                : 'border-slate-200/90 bg-white hover:border-rose-300 dark:border-slate-800 dark:bg-slate-900'
+            }`}
+          >
+            <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
+              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
+                <span>Evasões</span>
+              </span>
+              <span className="text-sm font-black text-rose-700 tabular-nums whitespace-nowrap dark:text-rose-400">
+                {metrics.evadidosCount}
+              </span>
+            </div>
+
+            <div className="flex h-6 items-center justify-between rounded border border-rose-200/80 bg-rose-50/50 px-2 text-[11px] text-rose-900 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
+              <span>Taxa na semana</span>
+              <span className="font-bold tabular-nums">
+                {metrics.evadidosPercent.toFixed(1)}%
+              </span>
+            </div>
+          </div>
+
+          {/* CARD 8: PENDÊNCIAS (3+ AULAS S/ APOSTILA & PRESENÇA S/ NPS) */}
           <div
             data-testid="dash-card-resumo-aula4-nps"
             className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200/90 bg-white px-2 py-1.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900"
           >
-            {/* Metade 1: 3+ Aulas s/ Apostila e Fin. em Dia */}
             <button
               type="button"
               data-testid="dash-card-aula4-sem-apostila"
               aria-pressed={isCardSelected('AULA_4_SEM_APOSTILA_FIN_EM_DIA')}
-              title="Alunos a partir da 3ª aula em diante sem apostila entregue e com o financeiro em dia"
               onClick={() => handleToggleCard('AULA_4_SEM_APOSTILA_FIN_EM_DIA')}
               className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
                 isCardSelected('AULA_4_SEM_APOSTILA_FIN_EM_DIA')
@@ -1892,7 +1844,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
               <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
                 <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
                   <BookX className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
-                  <span>3+ Aulas s/ Apostila</span>
+                  <span>Sem apostila</span>
                 </span>
                 {isCardSelected('AULA_4_SEM_APOSTILA_FIN_EM_DIA') && (
                   <Check className="h-2.5 w-2.5 shrink-0 text-amber-700 dark:text-amber-400" />
@@ -1900,15 +1852,14 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
               </div>
               <div className="flex w-full items-baseline justify-between gap-1 whitespace-nowrap">
                 <span className="text-[10px] text-amber-900/90 dark:text-amber-300">
-                  Fin. em dia
+                  3+ aulas
                 </span>
                 <span className="text-xs font-black text-amber-800 tabular-nums dark:text-amber-400">
-                  {metrics.aula4SemApostilaFinEmDiaCount} alunos
+                  {metrics.aula4SemApostilaFinEmDiaCount}
                 </span>
               </div>
             </button>
 
-            {/* Metade 2: Alunos com Presença na Semana e Sem Resposta ao NPS */}
             <button
               type="button"
               data-testid="dash-card-presenca-sem-nps"
@@ -1931,10 +1882,10 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
               </div>
               <div className="flex w-full items-baseline justify-between gap-1 whitespace-nowrap">
                 <span className="text-[10px] text-purple-900/90 dark:text-purple-300">
-                  NPS pendente
+                  Pendente
                 </span>
                 <span className="text-xs font-black text-purple-800 tabular-nums dark:text-purple-400">
-                  {metrics.presencaSemRespostaNpsCount} alunos
+                  {metrics.presencaSemRespostaNpsCount}
                 </span>
               </div>
             </button>

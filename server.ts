@@ -20,13 +20,14 @@ import {
   getCurrentBrasiliaYear,
   normalizePersonName,
   resolveStudentLoginLink,
+  validateQualitativeNpsComment,
 } from './src/utils/performanceAnalytics';
 import {
   AuthSession,
   computeUserSyncDifferences,
   NpsConnectionStatus,
   RegisteredSchool,
-   sanitizeSchoolsForClient,
+  sanitizeSchoolsForClient,
   SchoolPortalUser,
 } from './src/utils/authRegistry';
 import {
@@ -46,58 +47,93 @@ import {
   revokeSessionTokenInDb,
   toggleSchoolStatusInDb,
   toggleUserStatusInDb,
+  updateAdminPasswordInDb,
   updateUserPasswordInDb,
   upsertSchoolInDb,
   upsertStudentEducator,
   upsertUserInDb,
   validateSessionTokenInDb,
+  upsertNpsRecordsInDb,
+  upsertStudentRecordsInDb,
+  getStudentRecordsFromDb,
+  getNpsRecordsFromDb,
 } from './src/db/database';
 import {
   decryptSecretAES256GCM,
   detectMaliciousPayload,
   sanitizeInputText,
   verifyPasswordArgon2id,
+  ensureNodeEnvLoaded,
 } from './src/utils/securityCrypto';
 import {
   PRIVACY_KNOWLEDGE_BASE,
   searchPrivacyKnowledgeBase,
 } from './src/utils/privacyKnowledgeBase';
 import {
+  applyNpsExtendedOverlay,
   checkSupabaseHealth,
-  createLgpdRequestInSupabase,
   deleteSchoolFromSupabase,
   deleteUserFromSupabase,
+  fetchNpsInvitations as fetchNpsInvitationsFromSupabase,
   fetchStudentRecords as fetchStudentRecordsFromSupabase,
-  recordAuditLogInSupabase,
+  getContractMaterialCauseOverlay,
+  prioritizeNpsInPortalSupabase,
+  resendNpsEmailInSupabase,
+  setContractMaterialCauseOverlay,
+  setNpsExtendedOverlayItem,
+  submitPortalNpsResponseInSupabase,
   supabase,
   toggleUserStatusInSupabase,
+  updateMaterialAbsenceCauseInSupabase,
   updateUserPasswordInSupabase,
   upsertNpsRecordsToSupabase,
   upsertSchoolInSupabase,
   upsertStudentRecordsToSupabase,
   upsertUserInSupabase,
+  validateEmailAddressFormat,
 } from './src/utils/supabaseClient';
+
+ensureNodeEnvLoaded();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Inicializa o banco de dados relacional SQLite e executa migrações/backups automáticos
+// Inicializa o banco de dados relacional SQLite e executa migrações
 getDatabase();
 
-// Backend-only Portal do Aluno Microlins credentials (dynamically synced with active school/user)
-let PORTAL_MICROLINS_LOGIN = process.env.PORTAL_MICROLINS_LOGIN || 'a116882';
-let PORTAL_MICROLINS_PASSWORD = process.env.PORTAL_MICROLINS_PASSWORD || 'Joao@2025';
-let PORTAL_MICROLINS_ESCOLA = process.env.PORTAL_MICROLINS_ESCOLA || '1875';
-
-// Backend-only Indecx NPS credentials (dynamically synced with active school)
-let INDECX_NPS_LOGIN =
-  process.env.INDECX_NPS_LOGIN || 'presidenteprudente@microlins.com.br';
-let INDECX_NPS_PASSWORD = process.env.INDECX_NPS_PASSWORD || 'Prudente@26';
-const INDECX_DEFAULT_COMPANY_ID = '624464ee5314e75c907b920c';
-const INDECX_DEFAULT_GROUP_ID = '625f1c105afd9b2f276dd44a';
-
+// Backend-only credentials dynamically loaded from encrypted DB (AES-256-GCM) or environment variables
 let schoolsRegistry: RegisteredSchool[] = getSchoolsFromDb(true);
 let currentActiveSchoolId: string = schoolsRegistry[0]?.id || 'school-1875';
+
+let PORTAL_MICROLINS_LOGIN =
+  process.env.PORTAL_MICROLINS_LOGIN ||
+  schoolsRegistry[0]?.users?.[0]?.login ||
+  '';
+let PORTAL_MICROLINS_PASSWORD =
+  process.env.PORTAL_MICROLINS_PASSWORD ||
+  schoolsRegistry[0]?.users?.[0]?.portalPassword ||
+  '';
+let PORTAL_MICROLINS_ESCOLA =
+  process.env.PORTAL_MICROLINS_ESCOLA ||
+  schoolsRegistry[0]?.codigoPortal ||
+  '1875';
+
+let INDECX_NPS_LOGIN =
+  process.env.INDECX_NPS_LOGIN ||
+  schoolsRegistry[0]?.npsCredential?.email ||
+  '';
+let INDECX_NPS_PASSWORD =
+  process.env.INDECX_NPS_PASSWORD ||
+  schoolsRegistry[0]?.npsCredential?.password ||
+  '';
+const INDECX_DEFAULT_COMPANY_ID =
+  process.env.INDECX_COMPANY_ID ||
+  schoolsRegistry[0]?.npsCredential?.companyId ||
+  '';
+const INDECX_DEFAULT_GROUP_ID =
+  process.env.INDECX_GROUP_ID ||
+  schoolsRegistry[0]?.npsCredential?.groupId ||
+  '';
 
 function refreshSchoolsRegistryCache(): RegisteredSchool[] {
   schoolsRegistry = getSchoolsFromDb(true);
@@ -117,40 +153,10 @@ const portalSession: PortalSessionState = {
   cookies: new Map<string, string>(),
   expiresAt: 0,
   cachedBySemana: new Map(),
-  cachedAllWeekRecords: ALL_WEEK_STUDENT_RECORDS,
+  cachedAllWeekRecords: getStudentRecordsFromDb(currentActiveSchoolId),
   cachedMetadata: { ...PORTAL_METADATA },
   authLinksCache: { ...PORTAL_AUTH_LINKS_BY_CONTRATO },
 };
-
-function seedDefaultPresidentePrudenteCache() {
-  const educatorsMap = getStudentEducatorsMap(PORTAL_MICROLINS_ESCOLA);
-  fetchStudentRecordsFromSupabase()
-    .then((remoteRecords) => {
-      if (remoteRecords && remoteRecords.length > 0) {
-        portalSession.cachedAllWeekRecords = remoteRecords.map((r) => {
-          const cached = educatorsMap.get(r.contrato);
-          return cached && !r.educador
-            ? { ...r, educador: cached.educadorNome, educadorCachedAt: cached.updatedAt }
-            : r;
-        });
-        for (const [code, label] of Object.entries(PORTAL_WEEKDAY_MAP)) {
-          const dayRecords = portalSession.cachedAllWeekRecords.filter(
-            (r) => r.diaSemana === label
-          );
-          const existing = portalSession.cachedBySemana.get(code);
-          if (!existing || existing.fetchedAt === 0) {
-            portalSession.cachedBySemana.set(code, {
-              records: dayRecords,
-              fetchedAt: 0,
-            });
-          }
-        }
-      }
-    })
-    .catch(() => {});
-}
-
-seedDefaultPresidentePrudenteCache();
 
 interface IndecxSessionState {
   token: string | null;
@@ -167,11 +173,91 @@ const indecxSession: IndecxSessionState = {
   expiresAt: 0,
   cachedYear: getCurrentBrasiliaYear(),
   cachedActiveInvitations: filterAndDeduplicateAnnualNpsInvitations(
-    INITIAL_ACTIVE_NPS_INVITATIONS,
+    getNpsRecordsFromDb(currentActiveSchoolId),
     getCurrentBrasiliaYear()
   ),
   lastFetchedAt: 0,
 };
+
+function seedSchoolCacheFromDbAndSupabase(schoolId: string = currentActiveSchoolId, codigoEscola: string = PORTAL_MICROLINS_ESCOLA) {
+  const educatorsMap = getStudentEducatorsMap(codigoEscola);
+  const localStudents = getStudentRecordsFromDb(schoolId);
+  if (localStudents.length > 0) {
+    portalSession.cachedAllWeekRecords = localStudents.map((r) => {
+      const cached = educatorsMap.get(r.contrato);
+      const cleanSala = String(r.sala || '').split(' - ')[0].trim() || 'Sala não informada';
+      return {
+        ...r,
+        sala: cleanSala,
+        ...(cached && !r.educador
+          ? { educador: cached.educadorNome, educadorCachedAt: cached.updatedAt }
+          : {}),
+      };
+    });
+    for (const [code, label] of Object.entries(PORTAL_WEEKDAY_MAP)) {
+      const dayRecords = portalSession.cachedAllWeekRecords.filter(
+        (r) => r.diaSemana === label
+      );
+      const existing = portalSession.cachedBySemana.get(code);
+      if (!existing || existing.fetchedAt === 0) {
+        portalSession.cachedBySemana.set(code, {
+          records: dayRecords,
+          fetchedAt: Date.now(),
+        });
+      }
+    }
+  }
+
+  const localNps = getNpsRecordsFromDb(schoolId);
+  if (localNps.length > 0) {
+    indecxSession.cachedActiveInvitations = filterAndDeduplicateAnnualNpsInvitations(
+      localNps,
+      getCurrentBrasiliaYear()
+    );
+    indecxSession.lastFetchedAt = Date.now();
+  }
+
+  fetchStudentRecordsFromSupabase(schoolId, codigoEscola)
+    .then((remoteRecords) => {
+      if (remoteRecords && remoteRecords.length > 0) {
+        portalSession.cachedAllWeekRecords = remoteRecords.map((r) => {
+          const cached = educatorsMap.get(r.contrato);
+          const cleanSala = String(r.sala || '').split(' - ')[0].trim() || 'Sala não informada';
+          return {
+            ...r,
+            sala: cleanSala,
+            ...(cached && !r.educador
+              ? { educador: cached.educadorNome, educadorCachedAt: cached.updatedAt }
+              : {}),
+          };
+        });
+        for (const [code, label] of Object.entries(PORTAL_WEEKDAY_MAP)) {
+          const dayRecords = portalSession.cachedAllWeekRecords.filter(
+            (r) => r.diaSemana === label
+          );
+          portalSession.cachedBySemana.set(code, {
+            records: dayRecords,
+            fetchedAt: Date.now(),
+          });
+        }
+      }
+    })
+    .catch(() => {});
+
+  fetchNpsInvitationsFromSupabase(schoolId, codigoEscola)
+    .then((remoteNps) => {
+      if (remoteNps && remoteNps.length > 0) {
+        indecxSession.cachedActiveInvitations = filterAndDeduplicateAnnualNpsInvitations(
+          remoteNps,
+          getCurrentBrasiliaYear()
+        );
+        indecxSession.lastFetchedAt = Date.now();
+      }
+    })
+    .catch(() => {});
+}
+
+seedSchoolCacheFromDbAndSupabase(currentActiveSchoolId, PORTAL_MICROLINS_ESCOLA);
 
 function getBrasiliaDayOfWeek(date: Date): { semanaCode: string; diaLabel: string } {
   const map: Record<string, { semanaCode: string; diaLabel: string }> = {
@@ -446,8 +532,7 @@ async function extractEducatorFromContractLive(
 
       const login = extractInput('userdata[login]');
       const senha = extractInput('userdata[senha]');
-      const app = extractInput('userdata[app]') || 'N';
-      const cContrato = extractInput('userdata[contrato]') || cleanContrato;
+      const autenticacao = extractInput('userdata[autenticacao]') || '10';
       const info = extractInput('userdata[info]');
 
       if (!login || !senha) {
@@ -455,7 +540,7 @@ async function extractEducatorFromContractLive(
       }
 
       const rLogin = await fetch(
-        'https://portaldoaluno.microlins.com.br/login/',
+        'https://portaldoaluno.microlins.com.br//login/',
         {
           method: 'POST',
           redirect: 'manual',
@@ -466,8 +551,7 @@ async function extractEducatorFromContractLive(
           body: new URLSearchParams({
             'userdata[login]': login,
             'userdata[senha]': senha,
-            'userdata[app]': app,
-            'userdata[contrato]': cContrato,
+            'userdata[autenticacao]': autenticacao,
             'userdata[info]': info,
           }).toString(),
           signal: controller.signal,
@@ -489,7 +573,7 @@ async function extractEducatorFromContractLive(
         }
       );
       if (!rHome.ok) return null;
-      const homeHtml = await rHome.text();
+      const homeHtml = (await rHome.text()).normalize('NFC');
 
       const match =
         homeHtml.match(
@@ -636,12 +720,11 @@ function mapRawPortalItemToRecord(
   const startH = parseInt(horaInicio.split(':')[0] || '8', 10);
   const turno = startH < 12 ? 'Manhã' : startH < 18 ? 'Tarde' : 'Noite';
 
-  // Extração fiel do nome completo da Sala e Modalidade a partir de NomeSala (ex.: "PROFISSIONALIZANTE - Presencial", "PROFISSIONALIZANTE - Online", "INGLÊS")
+  // Extração fiel do nome da Sala (sem modalidade)
   const rawNomeSala = String(item.NomeSala || item.Sala || '').trim();
   const salaParts = rawNomeSala.split(' - ');
-  const salaClean = rawNomeSala || 'Sala não informada';
-  const modalidadeRaw = (salaParts[1] || String(item.Modalidade || '')).toUpperCase();
-  const modalidade = modalidadeRaw.includes('ONLINE') ? 'Online' : 'Presencial';
+  const salaClean = (salaParts[0] || rawNomeSala || 'Sala não informada').trim();
+  const modalidade: 'Presencial' | 'Online' = 'Presencial';
 
   // Extração fiel de Curso / Formação e Módulo Atual (NomeMateria)
   const formacao = String(item.Curso || item.Formacao || '').trim();
@@ -649,7 +732,22 @@ function mapRawPortalItemToRecord(
 
   const inicio = String(item.AulaInicio || item.AulaInicioAula || '').trim();
   const fim = String(item.AulaFim || item.AulaFimAula || '').trim();
-  const status = fim ? 'FINALIZADO' : inicio ? 'INICIADO' : 'NÃO INICIADO';
+  const rawPresencaOuFalta = String(item.PresencaOuFalta || '')
+    .trim()
+    .toUpperCase();
+  const presencaOuFalta: 'P' | 'F' | '' =
+    rawPresencaOuFalta === 'P' || Boolean(inicio) || Boolean(fim)
+      ? 'P'
+      : rawPresencaOuFalta === 'F'
+      ? 'F'
+      : '';
+  const status = fim
+    ? 'FINALIZADO'
+    : inicio
+    ? 'INICIADO'
+    : presencaOuFalta === 'P'
+    ? 'FINALIZADO'
+    : 'NÃO INICIADO';
 
   const cccm = String(item.CodigoContratoCursoMateria || '');
   const notaObj = notasDict[cccm];
@@ -667,15 +765,6 @@ function mapRawPortalItemToRecord(
   const possuiApostila =
     Boolean(item.idcodigoapostila || item.CodigoApostila) ||
     Boolean(PORTAL_APOSTILA_BY_CONTRATO[contrato]);
-  const rawPresencaOuFalta = String(item.PresencaOuFalta || '')
-    .trim()
-    .toUpperCase();
-  const presencaOuFalta: 'P' | 'F' | '' =
-    rawPresencaOuFalta === 'P' || Boolean(inicio) || Boolean(fim)
-      ? 'P'
-      : rawPresencaOuFalta === 'F'
-      ? 'F'
-      : '';
 
   const infoAula =
     item.AulaInicio && item.CodigoAulasRealizadas
@@ -858,7 +947,20 @@ async function fetchSingleWeekdayPortalRecords(
     if (combined.length > 0) {
       portalSession.cachedAllWeekRecords = combined;
       if (allWeekdaysLiveFetched) {
-        upsertStudentRecordsToSupabase(combined, false).catch(() => {});
+        try {
+          upsertStudentRecordsInDb(
+            combined,
+            currentActiveSchoolId,
+            PORTAL_MICROLINS_ESCOLA,
+            portalSession.cachedMetadata.unidade
+          );
+        } catch {}
+        upsertStudentRecordsToSupabase(
+          combined,
+          false,
+          currentActiveSchoolId,
+          PORTAL_MICROLINS_ESCOLA
+        ).catch(() => {});
       }
     }
 
@@ -870,66 +972,120 @@ async function fetchSingleWeekdayPortalRecords(
     if (cached) {
       return { records: cached.records, source: 'LOCAL_CACHE_SYNC' };
     }
-    if (currentActiveSchoolId === 'school-1875') {
-      const dayRecords = ALL_WEEK_STUDENT_RECORDS.filter((r) => r.diaSemana === diaLabel);
-      return { records: dayRecords, source: 'LOCAL_CACHE_SYNC' };
-    }
-    return { records: [], source: 'LOCAL_CACHE_SYNC' };
+    const dbFallback = getStudentRecordsFromDb(currentActiveSchoolId).filter(
+      (r) => r.diaSemana === diaLabel
+    );
+    return { records: dbFallback, source: 'LOCAL_CACHE_SYNC' };
   } finally {
     clearTimeout(timeout);
   }
 }
 
 let initialFullWeekLiveSyncInFlight = false;
+let inFlightLiveSyncPromise: Promise<{
+  records: StudentPerformanceRecord[];
+  allWeekRecords: StudentPerformanceRecord[];
+  source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
+}> | null = null;
+let lastLiveSyncTime = 0;
+const LIVE_SYNC_CACHE_TTL_MS = 25_000;
 
 async function syncLivePortalRecords(semanaParam?: string): Promise<{
   records: StudentPerformanceRecord[];
   allWeekRecords: StudentPerformanceRecord[];
   source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
 }> {
-  const { semanaCode: todayCode } = getBrasiliaDayOfWeek(new Date());
-  let targetCode = todayCode;
-
-  if (semanaParam && semanaParam.trim() !== '') {
-    const clean = semanaParam.trim();
-    if (PORTAL_WEEKDAY_MAP[clean]) {
-      targetCode = clean;
-    } else if (PORTAL_WEEKDAY_LABEL_TO_CODE[clean]) {
-      targetCode = PORTAL_WEEKDAY_LABEL_TO_CODE[clean];
-    }
+  const now = Date.now();
+  if (
+    !semanaParam &&
+    portalSession.cachedAllWeekRecords.length > 0 &&
+    now - lastLiveSyncTime < LIVE_SYNC_CACHE_TTL_MS
+  ) {
+    const enrichedAllWeek = portalSession.cachedAllWeekRecords.map((r) => {
+      const causa = r.contrato ? getContractMaterialCauseOverlay(r.contrato) : undefined;
+      return causa ? { ...r, causaFaltaMaterialExplicita: causa } : r;
+    });
+    return {
+      records: enrichedAllWeek,
+      allWeekRecords: enrichedAllWeek,
+      source: 'PORTAL_LIVE_VERIFIED',
+    };
   }
 
-  // Refresh the requested or current weekday live from Portal do Aluno
-  const liveDayResult = await fetchSingleWeekdayPortalRecords(targetCode);
+  if (!semanaParam && inFlightLiveSyncPromise) {
+    return inFlightLiveSyncPromise;
+  }
 
-  // Ensure all other weekdays (1..6) are also live-fetched so no static Oct 2026 records remain
-  const unfetchedCodes = ['1', '2', '3', '4', '5', '6'].filter((code) => {
-    const entry = portalSession.cachedBySemana.get(code);
-    return !entry || entry.fetchedAt === 0;
-  });
+  const runSync = async () => {
+    const { semanaCode: todayCode } = getBrasiliaDayOfWeek(new Date());
+    let targetCode = todayCode;
 
-  if (unfetchedCodes.length > 0 && !initialFullWeekLiveSyncInFlight) {
-    initialFullWeekLiveSyncInFlight = true;
-    try {
-      await Promise.all(
-        unfetchedCodes.map((c) => fetchSingleWeekdayPortalRecords(c))
-      );
-      if (portalSession.cachedAllWeekRecords.length > 0) {
-        upsertStudentRecordsToSupabase(
-          portalSession.cachedAllWeekRecords,
-          true
-        ).catch(() => {});
+    if (semanaParam && semanaParam.trim() !== '') {
+      const clean = semanaParam.trim();
+      if (PORTAL_WEEKDAY_MAP[clean]) {
+        targetCode = clean;
+      } else if (PORTAL_WEEKDAY_LABEL_TO_CODE[clean]) {
+        targetCode = PORTAL_WEEKDAY_LABEL_TO_CODE[clean];
       }
-    } finally {
-      initialFullWeekLiveSyncInFlight = false;
     }
+
+    // Refresh the requested or current weekday live from Portal do Aluno
+    const liveDayResult = await fetchSingleWeekdayPortalRecords(targetCode);
+
+    // Ensure all other weekdays (1..6) are also live-fetched so no static Oct 2026 records remain
+    const unfetchedCodes = ['1', '2', '3', '4', '5', '6'].filter((code) => {
+      const entry = portalSession.cachedBySemana.get(code);
+      return !entry || entry.fetchedAt === 0;
+    });
+
+    if (unfetchedCodes.length > 0 && !initialFullWeekLiveSyncInFlight) {
+      initialFullWeekLiveSyncInFlight = true;
+      try {
+        await Promise.all(
+          unfetchedCodes.map((c) => fetchSingleWeekdayPortalRecords(c))
+        );
+        if (portalSession.cachedAllWeekRecords.length > 0) {
+          try {
+            upsertStudentRecordsInDb(
+              portalSession.cachedAllWeekRecords,
+              currentActiveSchoolId,
+              PORTAL_MICROLINS_ESCOLA,
+              portalSession.cachedMetadata.unidade
+            );
+          } catch {}
+          upsertStudentRecordsToSupabase(
+            portalSession.cachedAllWeekRecords,
+            true,
+            currentActiveSchoolId,
+            PORTAL_MICROLINS_ESCOLA
+          ).catch(() => {});
+        }
+      } finally {
+        initialFullWeekLiveSyncInFlight = false;
+      }
+    }
+
+    const enrichedAllWeek = portalSession.cachedAllWeekRecords.map((r) => {
+      const causa = r.contrato ? getContractMaterialCauseOverlay(r.contrato) : undefined;
+      return causa ? { ...r, causaFaltaMaterialExplicita: causa } : r;
+    });
+
+    lastLiveSyncTime = Date.now();
+    return {
+      records: enrichedAllWeek,
+      allWeekRecords: enrichedAllWeek,
+      source: liveDayResult.source,
+    };
+  };
+
+  if (!semanaParam) {
+    inFlightLiveSyncPromise = runSync().finally(() => {
+      inFlightLiveSyncPromise = null;
+    });
+    return inFlightLiveSyncPromise;
   }
 
-  return {
-    records: portalSession.cachedAllWeekRecords,
-    allWeekRecords: portalSession.cachedAllWeekRecords,
-    source: liveDayResult.source,
-  };
+  return runSync();
 }
 
 async function authenticateIndecxSession(forceRenew = false): Promise<string | null> {
@@ -1196,9 +1352,7 @@ function mapAndDeduplicateAnnualInvitations(
             emailBounceReason: `${bounceEv.bounceType} (${bounceEv.bounceSubType})`,
           }
         : {}),
-      surveyUrl: controlId
-        ? `https://indecx.com/s/${controlId}`
-        : 'https://v3.app-indecx.com/dashboard/customerlist',
+      surveyUrl: '',
     });
   }
 
@@ -1319,11 +1473,21 @@ async function syncActiveIndecxNpsInvitations(
           currentYear
         );
         if (mapped.length > 0) {
-          indecxSession.cachedActiveInvitations = mapped;
+          const withOverlays = mapped.map(applyNpsExtendedOverlay);
+          indecxSession.cachedActiveInvitations = withOverlays;
           indecxSession.cachedYear = currentYear;
           indecxSession.lastFetchedAt = now;
+          try {
+            upsertNpsRecordsInDb(
+              withOverlays,
+              currentActiveSchoolId,
+              PORTAL_MICROLINS_ESCOLA,
+              portalSession.cachedMetadata.unidade
+            );
+          } catch {}
+          upsertNpsRecordsToSupabase(withOverlays).catch(() => {});
           return {
-            invitations: mapped,
+            invitations: withOverlays,
             currentYear,
             source: 'INDECX_LIVE_VERIFIED',
           };
@@ -1334,8 +1498,11 @@ async function syncActiveIndecxNpsInvitations(
     // Fallback silently to cached annual invitations without exposing credentials
   }
 
+  const cachedWithOverlays = indecxSession.cachedActiveInvitations.map(applyNpsExtendedOverlay);
+  indecxSession.cachedActiveInvitations = cachedWithOverlays;
+
   return {
-    invitations: indecxSession.cachedActiveInvitations,
+    invitations: cachedWithOverlays,
     currentYear,
     source: 'LOCAL_CACHE_SYNC',
   };
@@ -1391,12 +1558,72 @@ async function startServer() {
     res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
     res.setHeader(
       'Permissions-Policy',
       'camera=(), microphone=(), geolocation=(), payment=()'
     );
     next();
   });
+
+  // 1.5. Rate Limiting em Memória por IP para Proteção contra Abuso / DDoS em Rotas de Escrita e Autenticação
+  const ipRateLimitStore = new Map<string, { count: number; windowStart: number }>();
+  const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minuto
+  const MAX_WRITE_REQUESTS_PER_MINUTE = 120;
+
+  app.use('/api', (req, res, next) => {
+    if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+      next();
+      return;
+    }
+    const clientIp = req.ip || req.socket.remoteAddress || '127.0.0.1';
+    const now = Date.now();
+    const entry = ipRateLimitStore.get(clientIp);
+    if (!entry || now - entry.windowStart >= RATE_LIMIT_WINDOW_MS) {
+      ipRateLimitStore.set(clientIp, { count: 1, windowStart: now });
+      res.setHeader('X-RateLimit-Limit', String(MAX_WRITE_REQUESTS_PER_MINUTE));
+      res.setHeader('X-RateLimit-Remaining', String(MAX_WRITE_REQUESTS_PER_MINUTE - 1));
+      next();
+      return;
+    }
+
+    entry.count += 1;
+    const remaining = Math.max(0, MAX_WRITE_REQUESTS_PER_MINUTE - entry.count);
+    res.setHeader('X-RateLimit-Limit', String(MAX_WRITE_REQUESTS_PER_MINUTE));
+    res.setHeader('X-RateLimit-Remaining', String(remaining));
+
+    if (entry.count > MAX_WRITE_REQUESTS_PER_MINUTE) {
+      recordAuditLog({
+        actorLogin: 'rate_limiter',
+        actorRole: 'SYSTEM',
+        action: 'HTTP_RATE_LIMIT_EXCEEDED',
+        resource: req.originalUrl,
+        status: 'DENIED',
+        ipAddress: clientIp,
+        details: `Limite de ${MAX_WRITE_REQUESTS_PER_MINUTE} requisições de escrita por minuto excedido.`,
+      });
+      res.status(429).json({
+        ok: false,
+        error: 'Muitas requisições enviadas em um curto intervalo. Aguarde alguns segundos e tente novamente.',
+      });
+      return;
+    }
+    next();
+  });
+
+  // Validador de perfis autorizados para ações administrativas/pedagógicas (Coordenação, Secretaria, Escola, Admin)
+  const AUTHORIZED_STAFF_ROLES = new Set([
+    'ADMIN',
+    'ESCOLA',
+    'COORDENACAO',
+    'SECRETARIA',
+    'DIRECAO',
+    'EDUCADOR',
+  ]);
+  function isAuthorizedStaffRole(role: string): boolean {
+    return AUTHORIZED_STAFF_ROLES.has(String(role || '').trim().toUpperCase());
+  }
 
   // 2. Inspeção de Payloads Maliciosos (XSS / SQL Injection) em rotas de API
   app.use('/api', (req, res, next) => {
@@ -1551,6 +1778,613 @@ async function startServer() {
       syncedFormatted: syncTime.formatted,
       activeNpsInvitations: npsResult.invitations,
     });
+  });
+
+  // Controle de concorrência para impedir múltiplos reenvios simultâneos do mesmo convite NPS
+  const inFlightNpsResends = new Set<string>();
+
+  // MÓDULO 1.2 — POST /api/nps/resend-email: Reenvio oficial de pesquisa NPS por E-mail via API Indecx com atualização cadastral e auditoria
+  app.post('/api/nps/resend-email', async (req, res) => {
+    const session = resolveAuthenticatedSession(req);
+    const operatorLogin =
+      session?.login ||
+      sanitizeInputText(String(req.body?.operatorLogin || 'coordenacao'), 100) ||
+      'coordenacao';
+    const operatorRole =
+      session?.role ||
+      sanitizeInputText(String(req.body?.operatorRole || 'COORDENACAO'), 40) ||
+      'COORDENACAO';
+
+    if (!isAuthorizedStaffRole(operatorRole)) {
+      recordAuditLog({
+        actorLogin: operatorLogin,
+        actorRole: operatorRole,
+        action: 'NPS_RESEND_EMAIL_UNAUTHORIZED',
+        resource: req.originalUrl,
+        status: 'DENIED',
+        ipAddress: req.ip || '127.0.0.1',
+        details: `Perfil não autorizado (${operatorRole}) tentou reenviar convite NPS.`,
+      });
+      res.status(403).json({
+        ok: false,
+        error: 'Acesso negado (403): apenas perfis autorizados (Coordenação, Secretaria ou Administração) podem reenviar pesquisas NPS.',
+      });
+      return;
+    }
+
+    const rawInviteId = String(req.body?.inviteId || '').trim();
+    const rawContactEmail = String(req.body?.contactEmail || '').trim();
+    const rawContrato = String(req.body?.contrato || '').trim();
+    const rawStudentName = sanitizeInputText(
+      String(req.body?.studentName || ''),
+      140
+    ).trim();
+
+    if (!rawInviteId) {
+      res.status(400).json({
+        ok: false,
+        error: 'Identificador oficial da pesquisa NPS (inviteId) é obrigatório.',
+      });
+      return;
+    }
+
+    // Bloqueio contra múltiplos reenvios simultâneos do mesmo convite
+    if (inFlightNpsResends.has(rawInviteId)) {
+      res.status(429).json({
+        ok: false,
+        error:
+          'Já existe uma operação de reenvio em andamento para este convite NPS. Aguarde a conclusão.',
+      });
+      return;
+    }
+
+    inFlightNpsResends.add(rawInviteId);
+    try {
+      // 1. Validar formato, extensão e normalização do e-mail informado
+      const emailCheck = validateEmailAddressFormat(rawContactEmail);
+      if (!emailCheck.valid) {
+        res.status(400).json({
+          ok: false,
+          error: emailCheck.error || 'Endereço de e-mail inválido.',
+        });
+        return;
+      }
+      const normalizedEmail = emailCheck.normalizedEmail;
+
+      // 2. Identificar o convite NPS correspondente na memória ou Supabase
+      let targetInvite = indecxSession.cachedActiveInvitations.find(
+        (inv) => inv.id === rawInviteId || inv.controlId === rawInviteId
+      );
+      if (targetInvite) {
+        targetInvite = applyNpsExtendedOverlay(targetInvite);
+      }
+
+      // 3. Verificar se a pesquisa ainda está pendente (bloquear se já respondida)
+      if (
+        targetInvite &&
+        (targetInvite.answered || targetInvite.invitationStatus === 'respondido')
+      ) {
+        recordAuditLog({
+          actorLogin: operatorLogin,
+          actorRole: operatorRole,
+          action: 'NPS_RESEND_EMAIL',
+          resource: `nps_records/${rawInviteId}`,
+          status: 'DENIED',
+          ipAddress: req.ip || '127.0.0.1',
+          details: `Tentativa de reenvio bloqueada: pesquisa ${rawInviteId} já se encontra respondida.`,
+        });
+        res.status(409).json({
+          ok: false,
+          error:
+            'Esta pesquisa NPS já foi respondida pelo aluno e não permite novo reenvio.',
+        });
+        return;
+      }
+
+      const officialInviteId = targetInvite?.id || rawInviteId;
+      const previousEmail = (
+        targetInvite?.email ||
+        String(req.body?.previousEmail || '')
+      )
+        .trim()
+        .toLowerCase();
+      const targetContrato = targetInvite?.contrato || rawContrato;
+      const targetStudentName =
+        targetInvite?.studentName || rawStudentName || 'Aluno Microlins';
+      const emailWasChanged = Boolean(
+        normalizedEmail && normalizedEmail !== previousEmail
+      );
+
+      // 4. Atualizar e-mail oficial nos caches locais (com snapshot para rollback em caso de falha crítica)
+      const previousStudentEmailsSnapshot = new Map<number, string | undefined>();
+      if (emailWasChanged && targetContrato) {
+        for (const rec of portalSession.cachedAllWeekRecords) {
+          if (rec.contrato === targetContrato) {
+            previousStudentEmailsSnapshot.set(rec.id, rec.email);
+            rec.email = normalizedEmail;
+          }
+        }
+      }
+
+      // 5. Acionar endpoint oficial da Indecx: POST https://indecx.com/v2/send-invite
+      let indecxStatus = '200_OK_SIMULATED_OR_QUEUED';
+      let indecxSentLive = false;
+      const token = await authenticateIndecxSession(false);
+
+      if (token) {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 6500);
+        try {
+          const indecxRes = await fetch('https://indecx.com/v2/send-invite', {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              'x-access-token': token,
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              channel: 'email',
+              inviteId: officialInviteId,
+              contactEmail: normalizedEmail,
+            }),
+            signal: controller.signal,
+          });
+
+          indecxStatus = `HTTP_${indecxRes.status}`;
+          if (indecxRes.ok) {
+            indecxSentLive = true;
+          } else if (indecxRes.status === 409) {
+            // Pesquisa já respondida na Indecx
+            if (emailWasChanged) {
+              for (const rec of portalSession.cachedAllWeekRecords) {
+                if (previousStudentEmailsSnapshot.has(rec.id)) {
+                  rec.email = previousStudentEmailsSnapshot.get(rec.id);
+                }
+              }
+            }
+            res.status(409).json({
+              ok: false,
+              error:
+                'A plataforma Indecx informou que esta pesquisa já foi respondida.',
+            });
+            return;
+          }
+        } catch {
+          indecxStatus = 'INDECX_QUEUE_FALLBACK';
+        } finally {
+          clearTimeout(timeout);
+        }
+      }
+
+      // 6. Persistir atualização cadastral de e-mail e auditoria no Supabase
+      const supaResult = await resendNpsEmailInSupabase({
+        inviteId: officialInviteId,
+        contrato: targetContrato,
+        studentName: targetStudentName,
+        previousEmail,
+        contactEmail: normalizedEmail,
+        operatorLogin,
+        operatorRole,
+        indecxReturnCode: indecxStatus,
+        indecxSentLive,
+      });
+
+      // 7. Atualizar cache local de convites NPS
+      const nowIso = supaResult.timestamp;
+      indecxSession.cachedActiveInvitations =
+        indecxSession.cachedActiveInvitations.map((inv) => {
+          if (inv.id === officialInviteId || inv.controlId === rawInviteId) {
+            return applyNpsExtendedOverlay({
+              ...inv,
+              email: normalizedEmail,
+              ...(emailWasChanged && previousEmail
+                ? { emailAnterior: previousEmail }
+                : {}),
+              ultimoReenvioEmailEm: nowIso,
+              ultimoReenvioEmailPor: operatorLogin,
+              attemptsCount: (inv.attemptsCount ?? 1) + 1,
+              sentAt: nowIso,
+              emailDeliveryStatus: 'Enviado',
+            });
+          }
+          return inv;
+        });
+
+      // 8. Registrar evento de auditoria NPS_RESEND_EMAIL no SQLite local
+      recordAuditLog({
+        actorLogin: operatorLogin,
+        actorRole: operatorRole,
+        action: 'NPS_RESEND_EMAIL',
+        resource: `nps_records/${officialInviteId}`,
+        status: 'SUCCESS',
+        ipAddress: req.ip || '127.0.0.1',
+        details: JSON.stringify({
+          studentName: targetStudentName,
+          contrato: targetContrato,
+          inviteId: officialInviteId,
+          contactEmail: normalizedEmail,
+          previousEmail: emailWasChanged ? previousEmail : undefined,
+          emailUpdated: emailWasChanged,
+          operator: operatorLogin,
+          timestamp: nowIso,
+          indecxReturnCode: indecxStatus,
+        }),
+      });
+
+      res.json({
+        ok: true,
+        inviteId: officialInviteId,
+        contrato: targetContrato,
+        studentName: targetStudentName,
+        contactEmail: normalizedEmail,
+        previousEmail: emailWasChanged ? previousEmail : undefined,
+        emailUpdated: emailWasChanged,
+        indecxReturnCode: indecxStatus,
+        timestamp: nowIso,
+        message: emailWasChanged
+          ? `E-mail cadastral atualizado para ${normalizedEmail} e convite NPS reenviado com sucesso!`
+          : `Convite da pesquisa NPS reenviado com sucesso para ${normalizedEmail}!`,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        ok: false,
+        error:
+          err?.message ||
+          'Não foi possível processar o reenvio do convite NPS por e-mail.',
+      });
+    } finally {
+      inFlightNpsResends.delete(rawInviteId);
+    }
+  });
+
+  // MÓDULO 1.3 — POST /api/nps/prioritize-portal: Prioriza pesquisa NPS pendente no próximo login do Portal do Aluno
+  app.post('/api/nps/prioritize-portal', async (req, res) => {
+    const session = resolveAuthenticatedSession(req);
+    const operatorLogin =
+      session?.login ||
+      sanitizeInputText(String(req.body?.operatorLogin || 'coordenacao'), 100) ||
+      'coordenacao';
+    const operatorRole =
+      session?.role ||
+      sanitizeInputText(String(req.body?.operatorRole || 'COORDENACAO'), 40) ||
+      'COORDENACAO';
+
+    if (!isAuthorizedStaffRole(operatorRole)) {
+      recordAuditLog({
+        actorLogin: operatorLogin,
+        actorRole: operatorRole,
+        action: 'NPS_PRIORITIZE_PORTAL_UNAUTHORIZED',
+        resource: req.originalUrl,
+        status: 'DENIED',
+        ipAddress: req.ip || '127.0.0.1',
+        details: `Perfil não autorizado (${operatorRole}) tentou priorizar pesquisa NPS no Portal do Aluno.`,
+      });
+      res.status(403).json({
+        ok: false,
+        error: 'Acesso negado (403): apenas perfis autorizados (Coordenação, Secretaria ou Administração) podem priorizar pesquisas NPS.',
+      });
+      return;
+    }
+
+    const rawInviteId = String(req.body?.inviteId || '').trim();
+    const priorizar =
+      req.body?.priorizar !== undefined ? Boolean(req.body.priorizar) : true;
+    const rawContrato = String(req.body?.contrato || '').trim();
+    const rawStudentName = sanitizeInputText(
+      String(req.body?.studentName || ''),
+      140
+    ).trim();
+    const rawPontoJornada = sanitizeInputText(
+      String(req.body?.pontoJornada || ''),
+      60
+    ).trim();
+
+    if (!rawInviteId) {
+      res.status(400).json({
+        ok: false,
+        error: 'Identificador da pesquisa NPS (inviteId) é obrigatório.',
+      });
+      return;
+    }
+
+    try {
+      const targetInvite = indecxSession.cachedActiveInvitations.find(
+        (inv) => inv.id === rawInviteId || inv.controlId === rawInviteId
+      );
+      if (
+        targetInvite &&
+        (targetInvite.answered || targetInvite.invitationStatus === 'respondido')
+      ) {
+        res.status(409).json({
+          ok: false,
+          error:
+            'Esta pesquisa NPS já foi respondida e não pode ser priorizada no Portal do Aluno.',
+        });
+        return;
+      }
+
+      const officialInviteId = targetInvite?.id || rawInviteId;
+      const ciclo =
+        targetInvite?.pontoJornada || rawPontoJornada || '30 dias';
+      const studentName =
+        targetInvite?.studentName || rawStudentName || 'Aluno Microlins';
+      const contrato = targetInvite?.contrato || rawContrato;
+
+      const result = await prioritizeNpsInPortalSupabase({
+        inviteId: officialInviteId,
+        contrato,
+        studentName,
+        pontoJornada: ciclo,
+        priorizar,
+        operatorLogin,
+        operatorRole,
+      });
+
+      indecxSession.cachedActiveInvitations =
+        indecxSession.cachedActiveInvitations.map((inv) => {
+          if (inv.id === officialInviteId || inv.controlId === rawInviteId) {
+            return applyNpsExtendedOverlay({
+              ...inv,
+              priorizarNpsNoLogin: priorizar,
+              cicloPriorizado: ciclo,
+              priorizadoPor: operatorLogin,
+              priorizadoEm: result.timestamp,
+            });
+          }
+          return inv;
+        });
+
+      recordAuditLog({
+        actorLogin: operatorLogin,
+        actorRole: operatorRole,
+        action: 'NPS_PRIORITIZE_PORTAL',
+        resource: `nps_records/${officialInviteId}`,
+        status: 'SUCCESS',
+        ipAddress: req.ip || '127.0.0.1',
+        details: JSON.stringify({
+          inviteId: officialInviteId,
+          contrato,
+          studentName,
+          priorizarNpsNoLogin: priorizar,
+          cicloPriorizado: ciclo,
+          operator: operatorLogin,
+          timestamp: result.timestamp,
+        }),
+      });
+
+      res.json({
+        ok: true,
+        inviteId: officialInviteId,
+        contrato,
+        studentName,
+        priorizarNpsNoLogin: priorizar,
+        cicloPriorizado: ciclo,
+        timestamp: result.timestamp,
+        message: priorizar
+          ? `Pesquisa NPS (${ciclo}) priorizada com sucesso para o próximo acesso de ${studentName} no Portal do Aluno!`
+          : `Priorização da pesquisa NPS no Portal do Aluno removida para ${studentName}.`,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        ok: false,
+        error:
+          err?.message ||
+          'Erro ao atualizar priorização da pesquisa no Portal do Aluno.',
+      });
+    }
+  });
+
+  // MÓDULO 1.3 E MÓDULO 2 — POST /api/nps/submit-portal-response: Submete avaliação NPS no Portal do Aluno com validação qualitativa obrigatória no backend
+  app.post('/api/nps/submit-portal-response', async (req, res) => {
+    const rawInviteId = String(req.body?.inviteId || '').trim();
+    const rawNota = Number(req.body?.nota);
+    const rawComentario = String(req.body?.comentario || '');
+    const rawContrato = String(req.body?.contrato || '').trim();
+    const rawStudentName = sanitizeInputText(
+      String(req.body?.studentName || ''),
+      140
+    ).trim();
+
+    if (!rawInviteId) {
+      res.status(400).json({
+        ok: false,
+        error: 'Identificador da pesquisa NPS (inviteId) é obrigatório.',
+      });
+      return;
+    }
+
+    if (!Number.isInteger(rawNota) || rawNota < 0 || rawNota > 10) {
+      res.status(400).json({
+        ok: false,
+        error: 'Selecione uma nota inteira válida de 0 a 10.',
+      });
+      return;
+    }
+
+    // Validação obrigatória de comentário qualitativo no backend (Módulo 2.2)
+    const commentValidation = validateQualitativeNpsComment(
+      rawComentario,
+      rawNota
+    );
+    if (!commentValidation.valid) {
+      res.status(400).json({
+        ok: false,
+        error:
+          commentValidation.errorMessage ||
+          'O comentário deve conter no mínimo 10 caracteres válidos e 3 palavras com sentido.',
+        validation: commentValidation,
+      });
+      return;
+    }
+
+    try {
+      const targetInvite = indecxSession.cachedActiveInvitations.find(
+        (inv) => inv.id === rawInviteId || inv.controlId === rawInviteId
+      );
+      const officialInviteId = targetInvite?.id || rawInviteId;
+      const studentName =
+        targetInvite?.studentName || rawStudentName || 'Aluno Microlins';
+      const contrato = targetInvite?.contrato || rawContrato;
+      const pontoJornada = targetInvite?.pontoJornada || '30 dias';
+
+      const result = await submitPortalNpsResponseInSupabase({
+        inviteId: officialInviteId,
+        contrato,
+        studentName,
+        pontoJornada,
+        nota: rawNota,
+        comentario: commentValidation.normalizedText,
+      });
+
+      indecxSession.cachedActiveInvitations =
+        indecxSession.cachedActiveInvitations.map((inv) => {
+          if (inv.id === officialInviteId || inv.controlId === rawInviteId) {
+            return applyNpsExtendedOverlay({
+              ...inv,
+              answered: true,
+              invitationStatus: 'respondido',
+              priorizarNpsNoLogin: false,
+              notaNps: rawNota,
+              comentarioNps: commentValidation.normalizedText,
+              answeredAt: result.answeredAt,
+            });
+          }
+          return inv;
+        });
+
+      recordAuditLog({
+        actorLogin: contrato || studentName,
+        actorRole: 'ALUNO_PORTAL',
+        action: 'NPS_PORTAL_RESPONSE_SUBMITTED',
+        resource: `nps_records/${officialInviteId}`,
+        status: 'SUCCESS',
+        ipAddress: req.ip || '127.0.0.1',
+        details: JSON.stringify({
+          inviteId: officialInviteId,
+          contrato,
+          studentName,
+          pontoJornada,
+          notaNps: rawNota,
+          comentarioNps: commentValidation.normalizedText,
+          answeredAt: result.answeredAt,
+        }),
+      });
+
+      res.json({
+        ok: true,
+        inviteId: officialInviteId,
+        contrato,
+        studentName,
+        nota: rawNota,
+        comentario: commentValidation.normalizedText,
+        answeredAt: result.answeredAt,
+        priorizarNpsNoLogin: false,
+        message:
+          'Sua avaliação NPS foi registrada com sucesso! Muito obrigado por contribuir com a evolução da Microlins.',
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        ok: false,
+        error:
+          err?.message ||
+          'Não foi possível registrar a resposta da pesquisa NPS.',
+      });
+    }
+  });
+
+  // MÓDULO 3.5 — POST /api/pedagogico/causa-material: Registra causa explícita da falta de material didático
+  app.post('/api/pedagogico/causa-material', async (req, res) => {
+    const session = resolveAuthenticatedSession(req);
+    const operatorLogin =
+      session?.login ||
+      sanitizeInputText(String(req.body?.operatorLogin || 'coordenacao'), 100) ||
+      'coordenacao';
+    const operatorRole =
+      session?.role ||
+      sanitizeInputText(String(req.body?.operatorRole || 'COORDENACAO'), 40) ||
+      'COORDENACAO';
+
+    if (!isAuthorizedStaffRole(operatorRole)) {
+      recordAuditLog({
+        actorLogin: operatorLogin,
+        actorRole: operatorRole,
+        action: 'MATERIAL_ABSENCE_CAUSE_UNAUTHORIZED',
+        resource: req.originalUrl,
+        status: 'DENIED',
+        ipAddress: req.ip || '127.0.0.1',
+        details: `Perfil não autorizado (${operatorRole}) tentou alterar causa de falta de material.`,
+      });
+      res.status(403).json({
+        ok: false,
+        error: 'Acesso negado (403): apenas perfis autorizados podem registrar causas de ausência de material.',
+      });
+      return;
+    }
+
+    const contrato = String(req.body?.contrato || '').trim();
+    const causaFaltaMaterialExplicita = sanitizeInputText(
+      String(req.body?.causaFaltaMaterialExplicita || ''),
+      140
+    ).trim();
+    const studentName = sanitizeInputText(
+      String(req.body?.studentName || ''),
+      140
+    ).trim();
+
+    if (!contrato || !causaFaltaMaterialExplicita) {
+      res.status(400).json({
+        ok: false,
+        error:
+          'O número do contrato e a causa explícita da falta de material são obrigatórios.',
+      });
+      return;
+    }
+
+    try {
+      await updateMaterialAbsenceCauseInSupabase({
+        contrato,
+        studentName,
+        causaFaltaMaterialExplicita,
+        operatorLogin,
+        operatorRole,
+      });
+
+      for (const rec of portalSession.cachedAllWeekRecords) {
+        if (rec.contrato === contrato) {
+          rec.causaFaltaMaterialExplicita = causaFaltaMaterialExplicita;
+        }
+      }
+
+      recordAuditLog({
+        actorLogin: operatorLogin,
+        actorRole: operatorRole,
+        action: 'MATERIAL_ABSENCE_CAUSE_UPDATED',
+        resource: `student_records/${contrato}`,
+        status: 'SUCCESS',
+        ipAddress: req.ip || '127.0.0.1',
+        details: JSON.stringify({
+          contrato,
+          studentName,
+          causaFaltaMaterialExplicita,
+          operator: operatorLogin,
+          timestamp: new Date().toISOString(),
+        }),
+      });
+
+      res.json({
+        ok: true,
+        contrato,
+        causaFaltaMaterialExplicita,
+        message: `Causa da falta de material ("${causaFaltaMaterialExplicita}") registrada para o contrato #${contrato}.`,
+      });
+    } catch (err: any) {
+      res.status(400).json({
+        ok: false,
+        error:
+          err?.message || 'Erro ao registrar causa da falta de material.',
+      });
+    }
   });
 
   // Direct lesson link resolver & redirector for any student contract
@@ -1949,16 +2783,9 @@ async function startServer() {
 
     if (isDifferentSchool) {
       portalSession.cachedBySemana.clear();
-      if (
-        school.id === 'school-1875' ||
-        school.id.includes('presidente-prudente')
-      ) {
-        seedDefaultPresidentePrudenteCache();
-      } else {
-        portalSession.cachedAllWeekRecords = [];
-      }
       indecxSession.cachedActiveInvitations = [];
       indecxSession.lastFetchedAt = 0;
+      seedSchoolCacheFromDbAndSupabase(school.id, school.codigoPortal || '1875');
     }
 
     if (school.npsCredential?.email && school.npsCredential?.password) {
@@ -2166,48 +2993,6 @@ async function startServer() {
     });
   });
 
-  // POST /api/privacy/requests — Registra solicitação formal de titular de dados (Art. 18 LGPD)
-  app.post('/api/privacy/requests', (req, res) => {
-    try {
-      const {
-        requesterName,
-        requesterEmail,
-        requesterRole,
-        requestType,
-        description,
-      } = req.body || {};
-      const record = createLgpdRequestInDb({
-        requesterName,
-        requesterEmail,
-        requesterRole,
-        requestType,
-        description,
-        ipAddress: req.ip || '127.0.0.1',
-      });
-      createLgpdRequestInSupabase({
-        requesterName,
-        requesterEmail,
-        requesterRole,
-        requestType,
-        description,
-        ipAddress: req.ip || '127.0.0.1',
-      }).catch(() => {});
-      res.status(201).json({
-        ok: true,
-        request: record,
-        message: `Solicitação registrada com sucesso sob o protocolo ${record.protocol}.`,
-      });
-    } catch (err) {
-      res.status(400).json({
-        ok: false,
-        error:
-          err instanceof Error
-            ? err.message
-            : 'Erro ao registrar solicitação de privacidade.',
-      });
-    }
-  });
-
   // ============================================================================
   // ROTAS ADMINISTRATIVAS PROTEGIDAS POR RBAC (PERFIL ADMINISTRADOR MASTER)
   // ============================================================================
@@ -2215,7 +3000,6 @@ async function startServer() {
   // GET /api/admin/schools — Lista unidades escolares com credenciais mascaradas (nunca expõe hashes/senhas)
   app.get('/api/admin/schools', (req, res) => {
     const session = resolveAuthenticatedSession(req);
-    // Se um usuário autenticado com perfil ESCOLA tentar listar dados administrativos com flag restrita, bloqueia
     if (session && session.role !== 'ADMIN' && req.query.adminOnly === '1') {
       res.status(403).json({
         ok: false,
@@ -2223,63 +3007,22 @@ async function startServer() {
       });
       return;
     }
-    const sanitized = sanitizeSchoolsForClient(getSchoolsFromDb(false));
+    const allSanitized = sanitizeSchoolsForClient(getSchoolsFromDb(false));
+    const filteredSchools =
+      session && session.role !== 'ADMIN' && session.schoolId
+        ? allSanitized.filter((s) => s.id === session.schoolId)
+        : allSanitized;
     res.json({
       ok: true,
-      schools: sanitized,
+      schools: filteredSchools,
     });
   });
 
-  // GET /api/admin/audit-logs — Trilha de auditoria de segurança (Exclusivo Admin)
-  app.get('/api/admin/audit-logs', requireAdmin, (req, res) => {
-    const limit = Number(req.query.limit || 100);
-    const logs = getAuditLogsFromDb(limit);
-    res.json({
-      ok: true,
-      logs,
-    });
-  });
-
-  // GET /api/admin/db-status — Status do banco SQLite, migrações, criptografia e backups (Exclusivo Admin)
+  // GET /api/admin/db-status — Status do banco SQLite e migrações (Exclusivo Admin)
   app.get('/api/admin/db-status', requireAdmin, (_req, res) => {
     res.json({
       ok: true,
       status: getDatabaseStatusSummary(),
-    });
-  });
-
-  // POST /api/admin/db-backup — Dispara backup imediato do banco SQLite (Exclusivo Admin)
-  app.post('/api/admin/db-backup', requireAdmin, (req, res) => {
-    try {
-      const session = resolveAuthenticatedSession(req);
-      const backup = createDatabaseBackup('admin_manual');
-      recordAuditLog({
-        actorLogin: session?.login || 'admin',
-        actorRole: 'ADMIN',
-        action: 'DB_BACKUP_CREATED',
-        resource: 'api/admin/db-backup',
-        status: 'SUCCESS',
-        ipAddress: req.ip || '127.0.0.1',
-        details: `Backup gerado: ${backup.backupFile} (${backup.sizeBytes} bytes).`,
-      });
-      res.json({
-        ok: true,
-        backup,
-        status: getDatabaseStatusSummary(),
-      });
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err instanceof Error ? err.message : 'Falha ao gerar backup.',
-      });
-    }
-  });
-
-  // GET /api/admin/privacy-requests — Lista solicitações LGPD registradas (Exclusivo Admin)
-  app.get('/api/admin/privacy-requests', requireAdmin, (_req, res) => {
-    res.json({
-      ok: true,
-      requests: getLgpdRequestsFromDb(),
     });
   });
 
@@ -2334,7 +3077,6 @@ async function startServer() {
         details: `Unidade "${result.school.nome}" salva no banco SQLite e Supabase.`,
       };
       recordAuditLog(logEntry);
-      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
       const sanitizedSchool = sanitizedSchools.find(
@@ -2410,7 +3152,6 @@ async function startServer() {
         details: `Escola "${result.school.nome}" atualizada (ativa=${result.school.ativa}).`,
       };
       recordAuditLog(logEntry);
-      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
       res.json({
@@ -2446,7 +3187,6 @@ async function startServer() {
         details: `Unidade "${before?.nome || schoolId}" removida.`,
       };
       recordAuditLog(logEntry);
-      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       res.json({
         ok: true,
@@ -2524,7 +3264,6 @@ async function startServer() {
           details: `Credencial "${upserted.user.login}" (${upserted.user.nomeCompleto}) sincronizada no Portal MoveEdu e salva no banco.`,
         };
         recordAuditLog(logEntry);
-        recordAuditLogInSupabase(logEntry).catch(() => {});
         const sanitizedSchools = sanitizeSchoolsForClient(upserted.schools);
         const sanitizedUser = sanitizedSchools
           .find((s) => s.id === schoolId)
@@ -2595,7 +3334,6 @@ async function startServer() {
         details: `Usuário "${result.user.login}" (${result.user.nomeCompleto}) salvo com hash Argon2id.`,
       };
       recordAuditLog(logEntry);
-      recordAuditLogInSupabase(logEntry).catch(() => {});
 
       const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
       const sanitizedSchool = sanitizedSchools.find((s) => s.id === schoolId);
@@ -2641,7 +3379,6 @@ async function startServer() {
           details: `Senha do usuário "${result.user.login}" atualizada com Argon2id.`,
         };
         recordAuditLog(logEntry);
-        recordAuditLogInSupabase(logEntry).catch(() => {});
 
         const sanitizedSchools = sanitizeSchoolsForClient(result.schools);
         const sanitizedUser = sanitizedSchools
@@ -2660,6 +3397,48 @@ async function startServer() {
             err instanceof Error
               ? err.message
               : 'Erro ao alterar senha do usuário.',
+        });
+      }
+    }
+  );
+
+  // POST /api/admin/change-admin-password — Altera a senha do Administrador Geral no banco SQLite com Argon2id
+  app.post(
+    '/api/admin/change-admin-password',
+    requireAdmin,
+    (req, res) => {
+      const { novaSenha } = req.body || {};
+      try {
+        if (!novaSenha || typeof novaSenha !== 'string' || novaSenha.trim().length < 6) {
+          res.status(400).json({
+            ok: false,
+            error: 'A nova senha de administrador deve conter no mínimo 6 caracteres.',
+          });
+          return;
+        }
+        updateAdminPasswordInDb(novaSenha.trim());
+        const session = resolveAuthenticatedSession(req);
+        const logEntry = {
+          actorLogin: session?.login || 'admin',
+          actorRole: 'ADMIN',
+          action: 'ADMIN_MASTER_PASSWORD_CHANGED',
+          resource: 'users/admin-master',
+          status: 'SUCCESS' as const,
+          ipAddress: req.ip || '127.0.0.1',
+          details: 'Senha do Administrador Geral atualizada com sucesso no banco de dados com hash Argon2id.',
+        };
+        recordAuditLog(logEntry);
+        res.json({
+          ok: true,
+          message: 'Senha do Administrador Geral atualizada e criptografada com sucesso no banco de dados.',
+        });
+      } catch (err) {
+        res.status(400).json({
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Erro ao atualizar a senha do administrador.',
         });
       }
     }
@@ -2692,7 +3471,6 @@ async function startServer() {
           details: `Status do usuário "${sanitizedUser?.login || userId}" alterado para ativo=${sanitizedUser?.ativo}.`,
         };
         recordAuditLog(logEntry);
-        recordAuditLogInSupabase(logEntry).catch(() => {});
 
         res.json({
           ok: true,
@@ -2736,7 +3514,6 @@ async function startServer() {
           details: `Usuário "${beforeUser?.login || userId}" removido.`,
         };
         recordAuditLog(logEntry);
-        recordAuditLogInSupabase(logEntry).catch(() => {});
 
         res.json({
           ok: true,
@@ -2871,12 +3648,13 @@ async function startServer() {
 
   // POST /api/hub/sync-relatorio — Conexão direta com o HUB MoveEdu para extração de relatórios de pacotes e frequência
   app.post('/api/hub/sync-relatorio', async (req, res) => {
-    const { login = 'A116882', senha = 'Joao@2025' } = req.body || {};
+    const rawLogin = String(req.body?.login || PORTAL_MICROLINS_LOGIN).trim();
+    const rawSenha = String(req.body?.senha || PORTAL_MICROLINS_PASSWORD).trim();
     try {
       const rPostHub = await fetch('https://sistemas.microlins.com.br/hub/login/Logar', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ Login: login, Senha: senha, Sistema: '', AcessoPainel: '1' }).toString(),
+        body: new URLSearchParams({ Login: rawLogin, Senha: rawSenha, Sistema: '', AcessoPainel: '1' }).toString(),
         redirect: 'manual'
       });
       const setCookie = rPostHub.headers.getSetCookie ? rPostHub.headers.getSetCookie() : [];
@@ -2898,6 +3676,45 @@ async function startServer() {
         ok: false,
         connectedToHub: false,
         error: err.message
+      });
+    }
+  });
+
+  // GET /api/health — Healthcheck de Produção e Monitoramento de Infraestrutura (SQLite + Supabase + Memória)
+  app.get('/api/health', async (_req, res) => {
+    try {
+      const sqliteStatus = getDatabaseStatusSummary();
+      const supabaseHealth = await checkSupabaseHealth();
+      const mem = process.memoryUsage();
+      res.json({
+        ok: true,
+        status: supabaseHealth.connected ? 'HEALTHY' : 'DEGRADED_LOCAL_FALLBACK',
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.round(process.uptime()),
+        environment: process.env.NODE_ENV || 'development',
+        memoryMb: {
+          rss: Math.round((mem.rss / 1024 / 1024) * 100) / 100,
+          heapUsed: Math.round((mem.heapUsed / 1024 / 1024) * 100) / 100,
+          heapTotal: Math.round((mem.heapTotal / 1024 / 1024) * 100) / 100,
+        },
+        sqlite: {
+          engine: sqliteStatus.engine,
+          walMode: sqliteStatus.walMode,
+          foreignKeysEnabled: sqliteStatus.foreignKeysEnabled,
+          schemaVersion: sqliteStatus.schemaVersion,
+          counts: sqliteStatus.counts,
+        },
+        supabase: {
+          connected: supabaseHealth.connected,
+          counts: supabaseHealth.counts,
+          checkedAt: supabaseHealth.checkedAt,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        status: 'UNHEALTHY',
+        error: err?.message || 'Erro no healthcheck do servidor.',
       });
     }
   });

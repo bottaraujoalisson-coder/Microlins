@@ -82,12 +82,16 @@ CREATE TABLE IF NOT EXISTS student_records (
   unidade TEXT,
   municipio TEXT,
   educador TEXT,
-  educador_cached_at TEXT
+  educador_cached_at TEXT,
+  causa_falta_material_explicita TEXT
 );
+
+ALTER TABLE student_records ADD COLUMN IF NOT EXISTS causa_falta_material_explicita TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_student_records_contrato ON student_records(contrato);
 CREATE INDEX IF NOT EXISTS idx_student_records_dia_semana ON student_records(dia_semana);
 CREATE INDEX IF NOT EXISTS idx_student_records_unidade ON student_records(unidade);
+CREATE INDEX IF NOT EXISTS idx_student_records_educador ON student_records(educador);
 
 -- 4. Tabela de Convites e Pesquisas NPS (nps_records)
 CREATE TABLE IF NOT EXISTS nps_records (
@@ -97,6 +101,7 @@ CREATE TABLE IF NOT EXISTS nps_records (
   contrato TEXT,
   codigo_pessoa TEXT,
   email TEXT,
+  email_anterior TEXT,
   phone TEXT,
   action_name TEXT,
   ponto_jornada TEXT,
@@ -108,11 +113,31 @@ CREATE TABLE IF NOT EXISTS nps_records (
   sent_at TEXT,
   answered_at TEXT,
   attempts_count INTEGER,
-  survey_url TEXT
+  survey_url TEXT,
+  priorizar_nps_no_login BOOLEAN DEFAULT FALSE,
+  ciclo_priorizado TEXT,
+  priorizado_por TEXT,
+  priorizado_em TEXT,
+  nota_nps NUMERIC,
+  comentario_nps TEXT,
+  ultimo_reenvio_email_em TEXT,
+  ultimo_reenvio_email_por TEXT
 );
+
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS email_anterior TEXT;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS priorizar_nps_no_login BOOLEAN DEFAULT FALSE;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS ciclo_priorizado TEXT;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS priorizado_por TEXT;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS priorizado_em TEXT;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS nota_nps NUMERIC;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS comentario_nps TEXT;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS ultimo_reenvio_email_em TEXT;
+ALTER TABLE nps_records ADD COLUMN IF NOT EXISTS ultimo_reenvio_email_por TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_nps_records_contrato ON nps_records(contrato);
 CREATE INDEX IF NOT EXISTS idx_nps_records_control_id ON nps_records(control_id);
+CREATE INDEX IF NOT EXISTS idx_nps_records_invitation_status ON nps_records(invitation_status);
+CREATE INDEX IF NOT EXISTS idx_nps_records_priorizar_login ON nps_records(priorizar_nps_no_login);
 
 -- 5. Tabela de Trilha de Auditoria de Segurança (audit_logs)
 CREATE TABLE IF NOT EXISTS audit_logs (

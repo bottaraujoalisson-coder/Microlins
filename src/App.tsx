@@ -40,6 +40,7 @@ import {
 } from './data/microlinsData';
 import { supabase, fetchStudentRecords, fetchNpsInvitations, fetchSchoolsFromSupabase } from './utils/supabaseClient';
 import {
+  ALL_NPS_CYCLES,
   ApostilaFilterType,
   buildSynchronizedNpsStudentCards,
   compareWeekdayWithCurrent,
@@ -69,7 +70,6 @@ import {
   AuthSession,
   createDefaultSchoolsRegistry,
   DEFAULT_ADMIN_CREDENTIALS,
-  DEFAULT_ADMIN_PASSWORD_PLAIN,
   RegisteredSchool,
 } from './utils/authRegistry';
 import { StudentDetailModal } from './components/StudentDetailModal';
@@ -114,7 +114,7 @@ function computeRecordsSignature(list: StudentPerformanceRecord[]): string {
   let sig = `${list.length}:`;
   for (let i = 0; i < list.length; i++) {
     const r = list[i];
-    sig += `${r.id}:${r.status}:${r.presencaOuFalta || ''}:${r.inicio || ''}:${r.fim || ''}|`;
+    sig += `${r.id}:${r.status}:${r.presencaOuFalta || ''}:${r.inicio || ''}:${r.fim || ''}:${r.email || ''}:${r.causaFaltaMaterialExplicita || ''}|`;
   }
   return sig;
 }
@@ -124,7 +124,7 @@ function computeNpsSignature(list: ActiveNpsInvitation[]): string {
   let sig = `${list.length}:`;
   for (let i = 0; i < list.length; i++) {
     const inv = list[i];
-    sig += `${inv.id}:${inv.invitationStatus}:${inv.answered ? 1 : 0}|`;
+    sig += `${inv.id}:${inv.invitationStatus}:${inv.answered ? 1 : 0}:${inv.email || ''}:${inv.priorizarNpsNoLogin ? 1 : 0}:${inv.notaNps ?? ''}:${inv.comentarioNps || ''}:${inv.attemptsCount || 0}|`;
   }
   return sig;
 }
@@ -183,15 +183,7 @@ function getSimulatedWeekdayOverrideFromUrl(): string | undefined {
 function resolveDefaultWeekdayFilter(): string {
   const urlDay = getSimulatedWeekdayOverrideFromUrl();
   if (urlDay) return urlDay;
-  const currentLabel = getCurrentBrasiliaWeekdayLabel();
-  const dayHasRecords = ALL_WEEK_STUDENT_RECORDS.some(
-    (r) => r.diaSemana === currentLabel
-  );
-  if (!dayHasRecords) {
-    // No início da semana (Domingo), exibe a Segunda-feira (primeiro dia com aulas da semana nova, já zerado)
-    return 'Segunda-feira';
-  }
-  return currentLabel;
+  return getCurrentBrasiliaWeekdayLabel();
 }
 
 export default function App() {
@@ -379,35 +371,23 @@ export default function App() {
     return null;
   });
 
-  // Se iniciou como ADMIN via URL sem token de sessão ainda, obtém sessão real do servidor SQLite
+  // Valida e sincroniza sessão ativa com o servidor via Cookie HttpOnly / Bearer
   useEffect(() => {
-    if (authSession?.role === 'ADMIN' && !authSession.sessionToken) {
-      let active = true;
-      fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          login: DEFAULT_ADMIN_CREDENTIALS.login,
-          senha: DEFAULT_ADMIN_PASSWORD_PLAIN,
-        }),
+    let active = true;
+    fetch('/api/auth/session', { credentials: 'include' })
+      .then((r) => r.json())
+      .then((d) => {
+        if (active && d?.ok && d.session) {
+          setAuthSession(d.session);
+        }
       })
-        .then((r) => r.json())
-        .then((d) => {
-          if (active && d?.ok && d.session?.sessionToken) {
-            setAuthSession((prev) =>
-              prev ? { ...prev, sessionToken: d.session.sessionToken } : prev
-            );
-          }
-        })
-        .catch(() => {
-          // Ignore bootstrap error
-        });
-      return () => {
-        active = false;
-      };
-    }
-  }, [authSession?.role, authSession?.sessionToken]);
+      .catch(() => {
+        // Sem sessão ativa no servidor
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   // Carrega escolas e usuários cadastrados no servidor ao iniciar
   useEffect(() => {
@@ -541,16 +521,16 @@ export default function App() {
     useState<CourseCategoryFilterType>('TODOS');
   const [selectedFinancialStatus, setSelectedFinancialStatus] =
     useState<FinancialFilterType>('TODOS');
+  const [selectedFinalizacaoAntecipada, setSelectedFinalizacaoAntecipada] =
+    useState<boolean>(false);
   const [statusFilter, setStatusFilter] = useState<QuickCardFilter>('TODOS');
 
-  // === Filtros da aba KANBAN NPS (sem barra de pesquisa, conforme Item 2, aberto no Dia Atual por padrão) ===
+  // === Filtros da aba KANBAN NPS (abre no dia atual de Brasília) ===
   const [npsDiaSemana, setNpsDiaSemana] = useState<string>(() =>
     resolveDefaultWeekdayFilter()
   );
   const [npsOrigem, setNpsOrigem] = useState<'TODAS' | NpsOrigemType>('TODAS');
-  const [npsPontoJornada, setNpsPontoJornada] = useState<
-    'TODOS' | '30 dias' | '50 dias' | '70 dias' | '50+ dias'
-  >('TODOS');
+  const [npsPontoJornada, setNpsPontoJornada] = useState<string>('TODOS');
   const [npsHorario, setNpsHorario] = useState<string>('TODOS');
   const [npsDeliveryStatus, setNpsDeliveryStatus] = useState<
     'TODOS' | NpsEmailDeliveryStatusType
@@ -731,6 +711,9 @@ export default function App() {
     return () => clearInterval(timer);
   }, [syncPortalData]);
 
+  const effectiveEvalWeekday =
+    currentBrasiliaWeekday || getCurrentBrasiliaWeekdayLabel();
+
   // 1. Avaliação global de todos os agendamentos respeitando prioridade absoluta do sistema e regra dos 15 minutos
   const allEvaluatedRecords = useMemo(
     () =>
@@ -739,9 +722,9 @@ export default function App() {
         currentTimeMinutes,
         {},
         activeNpsInvitations,
-        currentBrasiliaWeekday
+        effectiveEvalWeekday
       ),
-    [records, currentTimeMinutes, activeNpsInvitations, currentBrasiliaWeekday]
+    [records, currentTimeMinutes, activeNpsInvitations, effectiveEvalWeekday]
   );
 
   // Registros filtrados pelo Dia da Semana selecionado no Kanban de Alunos
@@ -772,14 +755,6 @@ export default function App() {
       .map((h) => `${String(h).padStart(2, '0')}h`);
   }, [dayFilteredRecords]);
 
-  const modalidadeOptions = useMemo(() => {
-    const set = new Set<ModalityType>();
-    for (const r of dayFilteredRecords) {
-      if (r.modalidade) set.add(r.modalidade);
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
-  }, [dayFilteredRecords]);
-
   // Registros avaliados do Kanban de Alunos com filtros de cabeçalho (sem campo de busca)
   const headerFilteredRecords = useMemo(
     () =>
@@ -795,6 +770,7 @@ export default function App() {
           npsFilter: selectedNpsFilter,
           courseCategoryFilter: selectedCourseCategory,
           financialFilter: selectedFinancialStatus,
+          finalizacaoAntecipada: selectedFinalizacaoAntecipada,
           status: 'TODOS',
           attendanceFilter: 'TODOS',
           turno: 'TODOS',
@@ -807,7 +783,7 @@ export default function App() {
         currentTimeMinutes,
         {},
         activeNpsInvitations,
-        currentBrasiliaWeekday
+        effectiveEvalWeekday
       ),
     [
       allEvaluatedRecords,
@@ -819,9 +795,10 @@ export default function App() {
       selectedNpsFilter,
       selectedCourseCategory,
       selectedFinancialStatus,
+      selectedFinalizacaoAntecipada,
       currentTimeMinutes,
       activeNpsInvitations,
-      currentBrasiliaWeekday,
+      effectiveEvalWeekday,
     ]
   );
 
@@ -833,13 +810,13 @@ export default function App() {
         currentTimeMinutes,
         {},
         activeNpsInvitations,
-        currentBrasiliaWeekday
+        effectiveEvalWeekday
       ),
     [
       headerFilteredRecords,
       currentTimeMinutes,
       activeNpsInvitations,
-      currentBrasiliaWeekday,
+      effectiveEvalWeekday,
     ]
   );
 
@@ -877,13 +854,13 @@ export default function App() {
         currentTimeMinutes,
         {},
         activeNpsInvitations,
-        currentBrasiliaWeekday
+        effectiveEvalWeekday
       ),
     [
       activeStudentRecords,
       currentTimeMinutes,
       activeNpsInvitations,
-      currentBrasiliaWeekday,
+      effectiveEvalWeekday,
     ]
   );
 
@@ -894,7 +871,7 @@ export default function App() {
         activeNpsInvitations,
         allEvaluatedRecords,
         npsReferenceYear,
-        npsDiaSemana !== 'TODOS' ? npsDiaSemana : selectedDiaSemana,
+        npsDiaSemana !== 'TODOS' ? npsDiaSemana : undefined,
         currentTimeMinutes
       ),
     [
@@ -902,7 +879,6 @@ export default function App() {
       allEvaluatedRecords,
       npsReferenceYear,
       npsDiaSemana,
-      selectedDiaSemana,
       currentTimeMinutes,
     ]
   );
@@ -980,6 +956,77 @@ export default function App() {
     );
   }, [allEvaluatedRecords, selectedStudent]);
 
+  // Card de NPS sincronizado em tempo real para o modal aberto
+  const resolvedSelectedNpsStudentCard = useMemo(() => {
+    if (!selectedNpsStudentCard) return null;
+    return (
+      synchronizedNpsStudentCards.find(
+        (c) =>
+          c.id === selectedNpsStudentCard.id ||
+          c.controlId === selectedNpsStudentCard.controlId ||
+          c.latestActiveInvitation.id ===
+            selectedNpsStudentCard.latestActiveInvitation.id ||
+          c.linkedContrato === selectedNpsStudentCard.linkedContrato
+      ) || selectedNpsStudentCard
+    );
+  }, [synchronizedNpsStudentCards, selectedNpsStudentCard]);
+
+  // Atualização otimista + sincronização de convite NPS (Reenvio de E-mail, Priorização no Portal ou Resposta no Portal)
+  const handleNpsInvitationUpdated = useCallback(
+    (
+      inviteId: string,
+      patch: Partial<ActiveNpsInvitation>,
+      updatedContractEmail?: { contrato: string; email: string }
+    ) => {
+      setActiveNpsInvitations((prev) =>
+        prev.map((inv) => {
+          const isMatch =
+            inv.id === inviteId || inv.controlId === inviteId;
+          if (!isMatch) return inv;
+          return {
+            ...inv,
+            ...patch,
+          };
+        })
+      );
+      const emailToSync = updatedContractEmail?.email || patch.email;
+      const contractToSync = updatedContractEmail?.contrato || patch.contrato;
+      if (emailToSync && contractToSync) {
+        const cleanContract = String(contractToSync).trim();
+        setRecords((prev) =>
+          prev.map((r) =>
+            String(r.contrato).trim() === cleanContract
+              ? { ...r, email: emailToSync }
+              : r
+          )
+        );
+      }
+      setLastSyncTimestamp(formatCurrentBrasiliaSyncTimestamp());
+      syncPortalData();
+    },
+    [syncPortalData]
+  );
+
+  // Atualização explícita de causa de falta de material (Pilar 3)
+  const handleMaterialCauseUpdated = useCallback(
+    (contrato: string, causa: string) => {
+      const cleanContract = String(contrato).trim();
+      setRecords((prev) =>
+        prev.map((r) =>
+          String(r.contrato).trim() === cleanContract
+            ? {
+                ...r,
+                causaFaltaMaterialExplicita: causa,
+              }
+            : r
+        )
+      );
+      setLastSyncTimestamp(formatCurrentBrasiliaSyncTimestamp());
+      syncPortalData();
+    },
+    [syncPortalData]
+  );
+
   const toggleStatusFilter = (target: QuickCardFilter) => {
     triggerWithLoading(() => {
       setStatusFilter((prev) => (prev === target ? 'TODOS' : target));
@@ -995,6 +1042,7 @@ export default function App() {
     selectedNpsFilter !== 'TODOS' ||
     selectedCourseCategory !== 'TODOS' ||
     selectedFinancialStatus !== 'TODOS' ||
+    selectedFinalizacaoAntecipada ||
     statusFilter !== 'TODOS';
 
   const handleResetStudentFilters = () => {
@@ -1007,6 +1055,7 @@ export default function App() {
       setSelectedNpsFilter('TODOS');
       setSelectedCourseCategory('TODOS');
       setSelectedFinancialStatus('TODOS');
+      setSelectedFinalizacaoAntecipada(false);
       setStatusFilter('TODOS');
     }, 'Restaurando filtros padrão do Kanban de Alunos...');
   };
@@ -1332,7 +1381,7 @@ export default function App() {
         />
       ) : (
         <>
-          {/* REGIÃO 2: ÁREA DE FILTROS PADRONIZADA EM EXATAMENTE 2 LINHAS */}
+          {/* REGIÃO 2: ÁREA DE FILTROS PADRONIZADA EM 2 LINHAS */}
           {activeTab !== 'DASHBOARD' && activeTab !== 'PORTAL_ALUNO' && (
             <section
               aria-label="Filtros do painel ativo"
@@ -1340,7 +1389,7 @@ export default function App() {
               className="shrink-0 border-b border-slate-200/90 bg-white px-3 py-1.5 transition-colors sm:px-5 dark:border-slate-800 dark:bg-slate-900"
             >
               {activeTab === 'KANBAN_ALUNOS' ? (
-                /* 9 controles distribuídos em 5 colunas x 2 linhas (Sala ocupa 2 colunas para leitura integral) */
+                /* 9 controles distribuídos em 5 colunas x 2 linhas (Sala ocupa 2 colunas na 1ª linha) */
                 <div
                   data-testid="filters-row-1"
                   className="grid grid-cols-2 gap-1.5 sm:grid-cols-5"
@@ -1362,7 +1411,7 @@ export default function App() {
                           'Atualizando Kanban para o dia selecionado...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">Dia: Todos os dias</option>
                       {WEEKDAY_FILTER_OPTIONS.map((dia) => (
@@ -1381,6 +1430,7 @@ export default function App() {
                     <GraduationCap className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-[#004A8D] dark:text-sky-400" />
                     <select
                       id="filter-categoria-curso"
+                      data-testid="filter-categoria-curso"
                       aria-label="Categoria do Curso"
                       value={selectedCourseCategory}
                       onChange={(e) => {
@@ -1390,17 +1440,17 @@ export default function App() {
                           'Filtrando alunos por categoria de curso...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
-                      <option value="TODOS">Curso: Todos</option>
-                      <option value="INGLÊS">Curso: Inglês</option>
+                      <option value="TODOS">Categoria: Todas</option>
+                      <option value="INGLÊS">Categoria: Inglês</option>
                       <option value="PROFISSIONALIZANTE">
-                        Curso: Profissionalizante
+                        Categoria: Profissionalizante
                       </option>
                     </select>
                   </div>
 
-                  {/* Linha 1 - Col 3 e 4 (2 colunas): Sala */}
+                  {/* Linha 1 - Col 3 e 4: Sala */}
                   <div className="sm:col-span-2">
                     <label htmlFor="filter-sala" className="sr-only">
                       Sala
@@ -1416,10 +1466,10 @@ export default function App() {
                           'Filtrando alunos por sala...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODAS">
-                        Sala: Todas as salas ({salaOptions.length})
+                        Sala: Todas ({salaOptions.length})
                       </option>
                       {salaOptions.map((sala) => (
                         <option key={sala} value={sala}>
@@ -1445,7 +1495,7 @@ export default function App() {
                           'Filtrando alunos por horário...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 tabular-nums transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 tabular-nums transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">
                         Horário: Todos ({horarioOptions.length})
@@ -1458,30 +1508,35 @@ export default function App() {
                     </select>
                   </div>
 
-                  {/* Linha 2 - Col 1: Modalidade */}
-                  <div>
-                    <label htmlFor="filter-modalidade" className="sr-only">
-                      Modalidade
+                  {/* Linha 2 - Col 1: Finalização Antecipada */}
+                  <div className="relative">
+                    <label
+                      htmlFor="filter-finalizacao-antecipada"
+                      className="sr-only"
+                    >
+                      Finalização Antecipada
                     </label>
+                    <Clock className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-orange-600 dark:text-orange-400" />
                     <select
-                      id="filter-modalidade"
-                      aria-label="Modalidade"
-                      value={selectedModalidade}
+                      id="filter-finalizacao-antecipada"
+                      data-testid="filter-finalizacao-antecipada"
+                      aria-label="Filtro de Finalização Antecipada"
+                      value={selectedFinalizacaoAntecipada ? 'ANTECIPADA' : 'TODOS'}
                       onChange={(e) => {
-                        const val = e.target.value as 'TODAS' | ModalityType;
+                        const isAntecipada = e.target.value === 'ANTECIPADA';
                         triggerWithLoading(
-                          () => setSelectedModalidade(val),
-                          'Filtrando alunos por modalidade...'
+                          () => setSelectedFinalizacaoAntecipada(isAntecipada),
+                          'Filtrando alunos com finalização antecipada...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className={`typo-control h-7 w-full rounded-md border pl-6 pr-2 transition-colors focus:outline-none ${
+                        selectedFinalizacaoAntecipada
+                          ? 'border-orange-500 bg-orange-50 font-semibold text-orange-900 dark:border-orange-700 dark:bg-orange-950/60 dark:text-orange-200 dark:focus:bg-orange-950/60'
+                          : 'border-slate-200 bg-slate-50/70 text-slate-800 hover:border-slate-300 focus:border-[#004A8D] focus:bg-white dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800'
+                      }`}
                     >
-                      <option value="TODAS">Modalidade: Todas</option>
-                      {modalidadeOptions.map((mod) => (
-                        <option key={mod} value={mod}>
-                          Modalidade: {mod}
-                        </option>
-                      ))}
+                      <option value="TODOS">Finalização: Todas</option>
+                      <option value="ANTECIPADA">Finalização Antecipada</option>
                     </select>
                   </div>
 
@@ -1505,7 +1560,7 @@ export default function App() {
                           'Filtrando alunos por situação financeira...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">Financeiro: Todos</option>
                       <option value="EM_DIA">Financeiro: Em dia</option>
@@ -1530,7 +1585,7 @@ export default function App() {
                           'Filtrando alunos por situação de apostila...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODAS">Apostila: Todas</option>
                       <option value="COM_APOSTILA">Apostila: Entregue</option>
@@ -1557,7 +1612,7 @@ export default function App() {
                           'Filtrando alunos por convite de NPS...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">NPS: Todos</option>
                       <option value="COM_NPS">NPS: Possui NPS</option>
@@ -1574,7 +1629,7 @@ export default function App() {
                     title="Restaurar filtros padrão"
                     className={`typo-btn col-span-2 inline-flex h-7 items-center justify-center gap-1.5 rounded-md border px-2.5 transition-colors sm:col-span-1 ${
                       hasActiveStudentFilters
-                        ? 'border-slate-300 bg-white text-slate-700 hover:border-[#004A8D] hover:bg-sky-50/60 hover:text-[#004A8D] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
+                        ? 'border-slate-300 bg-white text-slate-700 hover:border-[#004A8D] hover:bg-sky-50/60 hover:text-[#004A8D] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
                         : 'cursor-not-allowed border-slate-200/70 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-600'
                     }`}
                   >
@@ -1604,7 +1659,7 @@ export default function App() {
                           'Atualizando Kanban NPS para o dia selecionado...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-7 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-7 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">Dia: Todos os dias</option>
                       {WEEKDAY_FILTER_OPTIONS.map((dia) => (
@@ -1630,7 +1685,7 @@ export default function App() {
                           'Filtrando convites NPS por horário...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 tabular-nums transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 tabular-nums transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">
                         Horário: Todos ({npsHorarioOptions.length})
@@ -1658,7 +1713,7 @@ export default function App() {
                           'Filtrando convites NPS por canal de origem...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODAS">Canal: Todos os canais</option>
                       <option value="Portal do Aluno">
@@ -1670,11 +1725,11 @@ export default function App() {
 
                   <div>
                     <label htmlFor="filter-nps-entrega" className="sr-only">
-                      Status de Entrega do Convite NPS
+                      Status de Envio do Convite NPS
                     </label>
                     <select
                       id="filter-nps-entrega"
-                      aria-label="Status de Entrega do Convite NPS"
+                      aria-label="Status de Envio do Convite NPS"
                       value={npsDeliveryStatus}
                       onChange={(e) => {
                         const val = e.target.value as
@@ -1682,17 +1737,17 @@ export default function App() {
                           | NpsEmailDeliveryStatusType;
                         triggerWithLoading(
                           () => setNpsDeliveryStatus(val),
-                          'Filtrando convites NPS por status real de entrega...'
+                          'Filtrando convites NPS por status de envio...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
-                      <option value="TODOS">Status Envio: Todos</option>
-                      <option value="Enviado">Status Envio: Enviado</option>
-                      <option value="Entregue">Status Envio: Entregue</option>
-                      <option value="Aberto">Status Envio: Aberto</option>
+                      <option value="TODOS">Status de envio: Todos</option>
+                      <option value="Enviado">Status de envio: Enviado</option>
+                      <option value="Entregue">Status de envio: Entregue</option>
+                      <option value="Aberto">Status de envio: Aberto</option>
                       <option value="Não entregue">
-                        Status Envio: Não entregue
+                        Status de envio: Não entregue
                       </option>
                     </select>
                   </div>
@@ -1703,27 +1758,24 @@ export default function App() {
                     </label>
                     <select
                       id="filter-nps-jornada"
+                      data-testid="filter-nps-jornada"
                       aria-label="Ciclo da Pesquisa NPS"
                       value={npsPontoJornada}
                       onChange={(e) => {
-                        const val = e.target.value as
-                          | 'TODOS'
-                          | '30 dias'
-                          | '50 dias'
-                          | '70 dias'
-                          | '50+ dias';
+                        const val = e.target.value;
                         triggerWithLoading(
                           () => setNpsPontoJornada(val),
                           'Filtrando convites NPS por ciclo de jornada...'
                         );
                       }}
-                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 px-2.5 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
                     >
                       <option value="TODOS">Ciclo: Todos os ciclos</option>
-                      <option value="30 dias">Ciclo: 30 dias</option>
-                      <option value="50 dias">Ciclo: 50 dias</option>
-                      <option value="70 dias">Ciclo: 70 dias</option>
-                      <option value="50+ dias">Ciclo: 50 e 70 dias (50+)</option>
+                      {ALL_NPS_CYCLES.map((ciclo) => (
+                        <option key={ciclo} value={ciclo}>
+                          Ciclo: {ciclo}
+                        </option>
+                      ))}
                     </select>
                   </div>
 
@@ -1735,7 +1787,7 @@ export default function App() {
                     title="Restaurar filtros NPS"
                     className={`typo-btn inline-flex h-7 items-center justify-center gap-1.5 rounded-md border px-3 transition-colors ${
                       hasActiveNpsFilters
-                        ? 'border-slate-300 bg-white text-slate-700 hover:border-[#004A8D] hover:bg-sky-50/60 hover:text-[#004A8D] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200'
+                        ? 'border-slate-300 bg-white text-slate-700 hover:border-[#004A8D] hover:bg-sky-50/60 hover:text-[#004A8D] dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
                         : 'cursor-not-allowed border-slate-200/70 bg-slate-50 text-slate-400 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-600'
                     }`}
                   >
@@ -1747,7 +1799,7 @@ export default function App() {
             </section>
           )}
 
-          {/* REGIÃO 3: CARDS DE RESUMO PADRONIZADOS EM EXATAMENTE 2 LINHAS (3 COLUNAS x 2 LINHAS) */}
+          {/* REGIÃO 3: CARDS DE RESUMO PADRONIZADOS */}
           {activeTab !== 'DASHBOARD' && activeTab !== 'PORTAL_ALUNO' && (
             <section
               aria-label={
@@ -1791,7 +1843,6 @@ export default function App() {
                     type="button"
                     onClick={() => toggleStatusFilter('Falta')}
                     aria-pressed={statusFilter === 'Falta'}
-                    title="Faltas registradas pelo sistema ou após 15 minutos do início da aula"
                     className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       statusFilter === 'Falta'
                         ? 'border-rose-500 bg-rose-50/90 ring-1 ring-rose-500/25 dark:border-rose-500 dark:bg-rose-950/60'
@@ -1814,7 +1865,6 @@ export default function App() {
                     type="button"
                     onClick={() => toggleStatusFilter('Não iniciada')}
                     aria-pressed={isNotStartedAttendanceStatus(statusFilter)}
-                    title="Aulas ainda não iniciadas ou dentro dos 15 minutos de tolerância"
                     className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       isNotStartedAttendanceStatus(statusFilter)
                         ? 'border-slate-400 bg-slate-100 ring-1 ring-slate-400/25 dark:border-slate-600 dark:bg-slate-800'
@@ -1888,10 +1938,7 @@ export default function App() {
                     <div className="flex min-w-0 items-center gap-1.5">
                       <CalendarCheck className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
-                        <span className="hidden sm:inline">
-                          Total de agendamentos
-                        </span>
-                        <span className="sm:hidden">Agendamentos</span>
+                        Agendamentos
                       </span>
                     </div>
                     <span className="typo-title-section ml-2 text-slate-800 tabular-nums dark:text-slate-100">
@@ -1905,7 +1952,6 @@ export default function App() {
                     data-testid="kpi-evasao"
                     onClick={() => toggleStatusFilter('EVASAO')}
                     aria-pressed={statusFilter === 'EVASAO'}
-                    title="Filtrar alunos identificados com possível evasão"
                     className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       statusFilter === 'EVASAO'
                         ? 'border-rose-500 bg-rose-100/80 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/60'
@@ -1944,7 +1990,7 @@ export default function App() {
                   </button>
                 </div>
               ) : (
-                /* 6 Cards do Kanban NPS organizados em 2 linhas de 3 cards (grid-cols-3) */
+                /* 5 Cards do Kanban NPS (sem o card Ciclo do NPS, com Status de envio expandido e claro) */
                 <div
                   data-testid="nps-summary-cards-grid"
                   className="grid grid-cols-2 gap-1.5 sm:grid-cols-3"
@@ -1959,12 +2005,19 @@ export default function App() {
                     <div className="flex min-w-0 items-center gap-1.5">
                       <Sparkles className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
                       <span className="typo-subtitle truncate text-slate-900 whitespace-nowrap dark:text-sky-100">
-                        Total de convites
+                        {npsDiaSemana !== 'TODOS' ? 'Convites no dia' : 'Total de convites'}
                       </span>
                     </div>
-                    <span className="typo-title-section ml-2 text-[#004A8D] tabular-nums dark:text-sky-300">
-                      {npsKPIs.totalConvites}
-                    </span>
+                    <div className="flex items-baseline gap-1">
+                      <span className="typo-title-section text-[#004A8D] tabular-nums dark:text-sky-300">
+                        {npsKPIs.totalConvites}
+                      </span>
+                      {npsDiaSemana !== 'TODOS' && (
+                        <span className="text-[10px] text-slate-500 tabular-nums">
+                          /{synchronizedNpsStudentCards.length}
+                        </span>
+                      )}
+                    </div>
                   </button>
 
                   {/* Linha 1 - Card 2: Convites pelo Portal */}
@@ -2045,7 +2098,6 @@ export default function App() {
                           }, 'Filtrando convites enviados diretamente ao Aluno...')
                         }
                         aria-pressed={npsDestinatarioFilter === 'ALUNO'}
-                        title="Filtrar convites enviados diretamente ao Aluno (Níveis 1 e 2)"
                         className={`typo-badge rounded border px-1.5 py-0.5 transition-colors ${
                           npsDestinatarioFilter === 'ALUNO'
                             ? 'border-[#004A8D] bg-[#004A8D] text-white'
@@ -2062,10 +2114,9 @@ export default function App() {
                             setNpsDestinatarioFilter((prev) =>
                               prev === 'RESPONSAVEL' ? 'TODOS' : 'RESPONSAVEL'
                             );
-                          }, 'Filtrando convites enviados ao Responsável (Nível 3)...')
+                          }, 'Filtrando convites enviados ao Responsável...')
                         }
                         aria-pressed={npsDestinatarioFilter === 'RESPONSAVEL'}
-                        title="Filtrar convites enviados ao Responsável (Níveis 3 e 4)"
                         className={`typo-badge rounded border px-1.5 py-0.5 transition-colors ${
                           npsDestinatarioFilter === 'RESPONSAVEL'
                             ? 'border-[#004A8D] bg-[#004A8D] text-white'
@@ -2077,78 +2128,78 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Linha 2 - Card 5: Resumo de Status Real de Entrega Indecx */}
+                  {/* Linha 2 - Card 5 (2 colunas): Status de envio com visualização clara e interativa */}
                   <div
                     data-testid="nps-kpi-real-delivery"
-                    className="flex h-8 items-center justify-between rounded-md border border-slate-200/90 bg-white px-2.5 dark:border-slate-800 dark:bg-slate-900"
+                    className="col-span-2 flex h-8 items-center justify-between gap-2 rounded-md border border-slate-200/90 bg-white px-2.5 sm:col-span-2 dark:border-slate-800 dark:bg-slate-900"
                   >
-                    <span className="typo-subtitle truncate text-slate-700 dark:text-slate-200">
-                      Envio Real
+                    <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
+                      Status de envio
                     </span>
-                    <div className="flex items-center gap-1 tabular-nums">
-                      <span
-                        title="Abertos pelo aluno/responsável"
-                        className="typo-badge rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300"
-                      >
-                        Ab: {npsKPIs.emailAbertoCount}
-                      </span>
-                      <span
-                        title="Entregues"
-                        className="typo-badge rounded bg-sky-50 px-1.5 py-0.5 text-sky-700 dark:bg-sky-950/60 dark:text-sky-300"
-                      >
-                        Ent: {npsKPIs.emailEntregueCount}
-                      </span>
-                      <span
-                        title="Não entregues (Bounce/Falha)"
-                        className="typo-badge rounded bg-rose-50 px-1.5 py-0.5 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300"
-                      >
-                        Falha: {npsKPIs.emailNaoEntregueCount}
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Linha 2 - Card 6: Ciclos da Jornada NPS (30d vs 50+ dias) */}
-                  <div
-                    data-testid="nps-kpi-ciclos-jornada"
-                    className="col-span-2 flex h-8 items-center justify-between rounded-md border border-slate-200/90 bg-white px-2.5 sm:col-span-1 dark:border-slate-800 dark:bg-slate-900"
-                  >
-                    <span className="typo-subtitle truncate text-slate-700 dark:text-slate-200">
-                      Ciclo NPS
-                    </span>
-                    <div className="flex items-center gap-1 tabular-nums">
+                    <div className="flex flex-wrap items-center gap-1 tabular-nums">
                       <button
                         type="button"
                         onClick={() =>
-                          triggerWithLoading(() => {
-                            setNpsPontoJornada((prev) =>
-                              prev === '30 dias' ? 'TODOS' : '30 dias'
-                            );
-                          }, 'Filtrando ciclo de 30 dias...')
+                          setNpsDeliveryStatus((prev) =>
+                            prev === 'Aberto' ? 'TODOS' : 'Aberto'
+                          )
                         }
+                        aria-pressed={npsDeliveryStatus === 'Aberto'}
                         className={`typo-badge rounded border px-1.5 py-0.5 transition-colors ${
-                          npsPontoJornada === '30 dias'
-                            ? 'border-[#004A8D] bg-[#004A8D] text-white'
-                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                          npsDeliveryStatus === 'Aberto'
+                            ? 'border-emerald-600 bg-emerald-600 text-white'
+                            : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 dark:border-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300'
                         }`}
                       >
-                        30 dias
+                        Abertos: {npsKPIs.emailAbertoCount}
                       </button>
                       <button
                         type="button"
                         onClick={() =>
-                          triggerWithLoading(() => {
-                            setNpsPontoJornada((prev) =>
-                              prev === '50+ dias' ? 'TODOS' : '50+ dias'
-                            );
-                          }, 'Filtrando ciclo de 50 e 70 dias...')
+                          setNpsDeliveryStatus((prev) =>
+                            prev === 'Entregue' ? 'TODOS' : 'Entregue'
+                          )
                         }
+                        aria-pressed={npsDeliveryStatus === 'Entregue'}
                         className={`typo-badge rounded border px-1.5 py-0.5 transition-colors ${
-                          npsPontoJornada === '50+ dias'
-                            ? 'border-[#004A8D] bg-[#004A8D] text-white'
-                            : 'border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                          npsDeliveryStatus === 'Entregue'
+                            ? 'border-sky-600 bg-sky-600 text-white'
+                            : 'border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100 dark:border-sky-800 dark:bg-sky-950/60 dark:text-sky-300'
                         }`}
                       >
-                        50+ dias
+                        Entregues: {npsKPIs.emailEntregueCount}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNpsDeliveryStatus((prev) =>
+                            prev === 'Enviado' ? 'TODOS' : 'Enviado'
+                          )
+                        }
+                        aria-pressed={npsDeliveryStatus === 'Enviado'}
+                        className={`typo-badge rounded border px-1.5 py-0.5 transition-colors ${
+                          npsDeliveryStatus === 'Enviado'
+                            ? 'border-indigo-600 bg-indigo-600 text-white'
+                            : 'border-indigo-200 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 dark:border-indigo-800 dark:bg-indigo-950/60 dark:text-indigo-300'
+                        }`}
+                      >
+                        Enviados: {npsKPIs.emailEnviadoCount}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNpsDeliveryStatus((prev) =>
+                            prev === 'Não entregue' ? 'TODOS' : 'Não entregue'
+                          )
+                        }
+                        aria-pressed={npsDeliveryStatus === 'Não entregue'}
+                        className={`typo-badge rounded border px-1.5 py-0.5 transition-colors ${
+                          npsDeliveryStatus === 'Não entregue'
+                            ? 'border-rose-600 bg-rose-600 text-white'
+                            : 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-950/60 dark:text-rose-300'
+                        }`}
+                      >
+                        Não entregues: {npsKPIs.emailNaoEntregueCount}
                       </button>
                     </div>
                   </div>
@@ -2182,11 +2233,16 @@ export default function App() {
                   columns={npsKanbanColumns}
                   onSelectStudentCard={setSelectedNpsStudentCard}
                   currentTimeStr={currentTimeStr}
+                  onInvitationUpdated={handleNpsInvitationUpdated}
+                  operatorLogin={activeUserLogin}
+                  operatorRole={authSession?.role || 'COORDENACAO'}
                 />
               ) : activeTab === 'DASHBOARD' ? (
                 <DashboardView
                   allEvaluatedRecords={allEvaluatedRecords}
                   onSelectStudentRecord={setSelectedStudentId}
+                  activeNpsInvitations={activeNpsInvitations}
+                  onMaterialCauseUpdated={handleMaterialCauseUpdated}
                 />
               ) : (
                 <div className="h-full overflow-y-auto pr-1">
@@ -2196,6 +2252,8 @@ export default function App() {
                     onSelectStudentId={(id) => setPortalHubStudentId(id)}
                     unidadeAtual={portalMeta.unidade}
                     initialSubTab={portalHubInitialSubTab}
+                    activeNpsInvitations={activeNpsInvitations}
+                    onNpsInvitationUpdated={handleNpsInvitationUpdated}
                   />
                 </div>
               )}
@@ -2280,9 +2338,12 @@ export default function App() {
 
       {/* Modal de Detalhes e Histórico Cronológico de Pesquisas do Aluno (Kanban NPS) */}
       <NpsInvitationDetailModal
-        studentCard={selectedNpsStudentCard}
+        studentCard={resolvedSelectedNpsStudentCard}
         currentYear={npsReferenceYear}
         onClose={() => setSelectedNpsStudentCard(null)}
+        onInvitationUpdated={handleNpsInvitationUpdated}
+        operatorLogin={activeUserLogin}
+        operatorRole={authSession?.role || 'COORDENACAO'}
       />
     </div>
   );

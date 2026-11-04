@@ -293,33 +293,6 @@ function runMigrations(db: DatabaseSync): void {
           expires_at TEXT NOT NULL,
           used_at TEXT
         );
-
-        CREATE TABLE IF NOT EXISTS audit_logs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          timestamp TEXT NOT NULL,
-          actor_login TEXT NOT NULL,
-          actor_role TEXT NOT NULL,
-          action TEXT NOT NULL,
-          resource TEXT NOT NULL,
-          status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'DENIED', 'ERROR')),
-          ip_address TEXT NOT NULL DEFAULT '',
-          details TEXT NOT NULL DEFAULT ''
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
-
-        CREATE TABLE IF NOT EXISTS lgpd_requests (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          protocol TEXT NOT NULL UNIQUE,
-          requester_name TEXT NOT NULL,
-          requester_email TEXT NOT NULL,
-          requester_role TEXT NOT NULL,
-          request_type TEXT NOT NULL,
-          description TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'RECEBIDA',
-          created_at TEXT NOT NULL,
-          resolved_at TEXT
-        );
       `,
     },
     {
@@ -336,6 +309,46 @@ function runMigrations(db: DatabaseSync): void {
 
         CREATE INDEX IF NOT EXISTS idx_student_educators_educador ON student_educators(educador_nome);
         CREATE INDEX IF NOT EXISTS idx_student_educators_escola ON student_educators(escola_codigo);
+      `,
+    },
+    {
+      version: 3,
+      name: '003_multi_school_student_and_nps_records',
+      sql: `
+        DROP TABLE IF EXISTS audit_logs;
+        DROP TABLE IF EXISTS lgpd_requests;
+
+        CREATE TABLE IF NOT EXISTS student_records (
+          id INTEGER PRIMARY KEY,
+          contrato TEXT NOT NULL,
+          school_id TEXT NOT NULL DEFAULT 'school-1875',
+          escola_codigo TEXT NOT NULL DEFAULT '1875',
+          unidade TEXT NOT NULL DEFAULT 'ESCOLA PRESIDENTE PRUDENTE',
+          dia_semana TEXT NOT NULL DEFAULT '',
+          educador TEXT NOT NULL DEFAULT '',
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_student_records_school_id ON student_records(school_id);
+        CREATE INDEX IF NOT EXISTS idx_student_records_escola_codigo ON student_records(escola_codigo);
+        CREATE INDEX IF NOT EXISTS idx_student_records_contrato ON student_records(contrato);
+        CREATE INDEX IF NOT EXISTS idx_student_records_dia ON student_records(dia_semana);
+
+        CREATE TABLE IF NOT EXISTS nps_records (
+          id TEXT PRIMARY KEY,
+          control_id TEXT NOT NULL DEFAULT '',
+          contrato TEXT NOT NULL DEFAULT '',
+          school_id TEXT NOT NULL DEFAULT 'school-1875',
+          escola_codigo TEXT NOT NULL DEFAULT '1875',
+          unidade TEXT NOT NULL DEFAULT 'ESCOLA PRESIDENTE PRUDENTE',
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_nps_records_school_id ON nps_records(school_id);
+        CREATE INDEX IF NOT EXISTS idx_nps_records_escola_codigo ON nps_records(escola_codigo);
+        CREATE INDEX IF NOT EXISTS idx_nps_records_contrato ON nps_records(contrato);
       `,
     },
   ];
@@ -367,7 +380,11 @@ function seedAndMigrateLegacyData(db: DatabaseSync): void {
     .get(adminLogin) as { id: string; password_hash: string } | undefined;
 
   const now = new Date().toISOString();
-  if (!existingAdmin) {
+  if (!existingAdmin && DEFAULT_ADMIN_CREDENTIALS.senha) {
+    const initialAdminPlain = process.env.ADMIN_INITIAL_PASSWORD;
+    const initialAdminHash = initialAdminPlain
+      ? hashPasswordArgon2id(initialAdminPlain)
+      : DEFAULT_ADMIN_CREDENTIALS.senha;
     db.prepare(
       `INSERT INTO users (
         id, school_id, login, password_hash, portal_password_enc,
@@ -376,70 +393,18 @@ function seedAndMigrateLegacyData(db: DatabaseSync): void {
     ).run(
       'admin-master',
       adminLogin,
-      DEFAULT_ADMIN_CREDENTIALS.senha,
+      initialAdminHash,
       DEFAULT_ADMIN_CREDENTIALS.nomeCompleto,
       DEFAULT_ADMIN_CREDENTIALS.cargo,
       now,
       now
     );
-  } else if (!isArgon2idHash(existingAdmin.password_hash)) {
+  } else if (existingAdmin && !isArgon2idHash(existingAdmin.password_hash)) {
     db.prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(
       hashPasswordArgon2id(existingAdmin.password_hash),
       now,
       existingAdmin.id
     );
-  }
-
-  // Limpar bloqueios residuais das contas institucionais padrão ao inicializar
-  try {
-    db.prepare(
-      "DELETE FROM login_attempts WHERE identifier IN ('admin', 'alisson', 'a116882')"
-    ).run();
-  } catch {
-    // Ignore if table not ready
-  }
-
-  // Garantir integridade da credencial padrão da escola (a116882) caso tenha sido sobrescrita por teste de reset
-  try {
-    const existingDefaultUser = db
-      .prepare('SELECT id, portal_password_enc FROM users WHERE login = ?')
-      .get('a116882') as { id: string; portal_password_enc: string } | undefined;
-    if (existingDefaultUser) {
-      const dec = decryptSecretAES256GCM(existingDefaultUser.portal_password_enc || '');
-      if (!dec || dec === 'ggh  gg') {
-        db.prepare(
-          'UPDATE users SET password_hash = ?, portal_password_enc = ?, ativo = 1, updated_at = ? WHERE id = ?'
-        ).run(
-          hashPasswordArgon2id('Joao@2025'),
-          encryptSecretAES256GCM('Joao@2025'),
-          now,
-          existingDefaultUser.id
-        );
-      }
-    }
-  } catch {
-    // Ignore repair error
-  }
-
-  // 1.1. Semente de educadores verificados em tempo real na unidade Presidente Prudente (1875)
-  try {
-    const knownEducators = [
-      { contrato: '4680032', nomeAluno: 'Luiz Henrique Rocha dos Santos', educadorNome: 'João Pedro da Silva Santos' },
-      { contrato: '4782770', nomeAluno: 'Maria Eloah Ferreira Candido', educadorNome: 'Luana Menezes Monguilod' },
-      { contrato: '5109985', nomeAluno: 'André Luiz dos Santos Silva', educadorNome: 'Luana Menezes Monguilod' },
-    ];
-    const upsertStmt = db.prepare(`
-      INSERT INTO student_educators (contrato, nome_aluno, educador_nome, escola_codigo, updated_at)
-      VALUES (?, ?, ?, '1875', ?)
-      ON CONFLICT(contrato) DO UPDATE SET
-        educador_nome = excluded.educador_nome,
-        updated_at = excluded.updated_at
-    `);
-    for (const k of knownEducators) {
-      upsertStmt.run(k.contrato, k.nomeAluno, k.educadorNome, now);
-    }
-  } catch {
-    // Ignore seed error
   }
 
   // 2. Verificar se já existem escolas no banco SQLite
@@ -454,6 +419,7 @@ function seedAndMigrateLegacyData(db: DatabaseSync): void {
   // 3. Carregar do JSON legado (.data/schools-registry.json) se existir, senão do registro inicial padrão
   let sourceSchools: RegisteredSchool[] = createDefaultSchoolsRegistry();
   if (currentDbFilePath !== ':memory:' && fs.existsSync(LEGACY_JSON_FILE)) {
+
     try {
       const raw = fs.readFileSync(LEGACY_JSON_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
@@ -515,14 +481,16 @@ function seedAndMigrateLegacyData(db: DatabaseSync): void {
       for (const u of s.users || []) {
         const cleanLogin = normalizeLoginIdentifier(u.login);
         if (!cleanLogin) continue;
-        const rawUserPass = u.senha || 'Microlins@2026';
+        const rawUserPass = u.senha || '';
         const passwordHash = isArgon2idHash(rawUserPass)
           ? rawUserPass
-          : hashPasswordArgon2id(rawUserPass);
+          : rawUserPass
+            ? hashPasswordArgon2id(rawUserPass)
+            : hashPasswordArgon2id('initial-auth-required');
         const portalPassSource = u.portalPassword || rawUserPass;
         const portalPasswordEnc = isEncryptedSecret(portalPassSource)
           ? portalPassSource
-          : !isArgon2idHash(portalPassSource)
+          : !isArgon2idHash(portalPassSource) && portalPassSource
             ? encryptSecretAES256GCM(portalPassSource)
             : '';
         const isUserActive = u.ativo !== false && u.active !== false;
@@ -541,15 +509,6 @@ function seedAndMigrateLegacyData(db: DatabaseSync): void {
         );
       }
     }
-
-    db.prepare(
-      `INSERT INTO audit_logs (
-        timestamp, actor_login, actor_role, action, resource, status, ip_address, details
-      ) VALUES (?, 'system', 'SYSTEM', 'DB_MIGRATION_COMPLETED', 'sqlite:microlins_production', 'SUCCESS', '127.0.0.1', ?)`
-    ).run(
-      now,
-      `Migração relacional concluída com sucesso (${sourceSchools.length} unidade(s) verificada(s), Argon2id + AES-256-GCM ativos).`
-    );
 
     db.exec('COMMIT;');
   } catch (err) {
@@ -633,8 +592,8 @@ export function getSchoolsFromDb(decryptSecretsForInternalSync: boolean = false)
         companyFilter: row.nps_company_filter
           ? String(row.nps_company_filter)
           : undefined,
-        companyId: '624464ee5314e75c907b920c',
-        groupId: '625f1c105afd9b2f276dd44a',
+        companyId: process.env.INDECX_COMPANY_ID || '',
+        groupId: process.env.INDECX_GROUP_ID || '',
         baseUrl: String(row.nps_base_url || 'https://app.indecx.com'),
         active: isNpsActive,
         connectionStatus: isNpsActive ? 'CONECTADO' : 'NAO_CONFIGURADO',
@@ -951,6 +910,23 @@ export function deleteUserFromDb(
 }
 
 /**
+ * Atualiza a senha mestra do Perfil Administrador diretamente no banco de dados SQLite (com hash Argon2id).
+ */
+export function updateAdminPasswordInDb(newPasswordPlain: string): boolean {
+  const db = getDatabase();
+  const cleanPass = (newPasswordPlain || '').trim();
+  if (cleanPass.length < 6) {
+    throw new Error('A nova senha de administrador deve conter no mínimo 6 caracteres.');
+  }
+  const passwordHash = hashPasswordArgon2id(cleanPass);
+  const now = new Date().toISOString();
+  const res = db
+    .prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE role = 'ADMIN'")
+    .run(passwordHash, now);
+  return res.changes > 0;
+}
+
+/**
  * Proteção contra Força Bruta (Rate Limiting por identificador/login).
  */
 export function checkLoginRateLimit(identifierRaw: string): {
@@ -1160,8 +1136,7 @@ export function authenticateUserInDb(
   );
   const isPasswordValid =
     verifyPasswordArgon2id(senha, passwordHash) ||
-    Boolean(portalPasswordPlain && portalPasswordPlain === senha) ||
-    (userRow.role === 'ADMIN' && (senha === 'admin123' || senha === '06281410'));
+    Boolean(portalPasswordPlain && portalPasswordPlain === senha);
 
   if (!isPasswordValid) {
     if (!rateLimit.allowed) {
@@ -1515,9 +1490,9 @@ export function resetPasswordWithRecoveryTokenInDb(
 }
 
 /**
- * Registra eventos na trilha de auditoria persistente.
+ * Stubs vazios (Logs de auditoria e solicitações LGPD removidos por diretriz arquitetural).
  */
-export function recordAuditLog(entry: {
+export function recordAuditLog(_entry: {
   actorLogin: string;
   actorRole: string;
   action: string;
@@ -1526,46 +1501,14 @@ export function recordAuditLog(entry: {
   ipAddress?: string;
   details?: string;
 }): void {
-  const db = getDatabase();
-  db.prepare(
-    `INSERT INTO audit_logs (
-      timestamp, actor_login, actor_role, action, resource, status, ip_address, details
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(
-    new Date().toISOString(),
-    sanitizeInputText(entry.actorLogin || 'anonymous', 120),
-    sanitizeInputText(entry.actorRole || 'ANONYMOUS', 40),
-    sanitizeInputText(entry.action, 80),
-    sanitizeInputText(entry.resource, 160),
-    entry.status,
-    sanitizeInputText(entry.ipAddress || '127.0.0.1', 64),
-    sanitizeInputText(entry.details || '', 500)
-  );
+  // No-op: log do sistema desativado/removido
 }
 
-export function getAuditLogsFromDb(limit: number = 100): AuditLogEntry[] {
-  const db = getDatabase();
-  const rows = db
-    .prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?')
-    .all(Math.min(500, Math.max(1, limit))) as Array<Record<string, unknown>>;
-
-  return rows.map((r) => ({
-    id: Number(r.id),
-    timestamp: String(r.timestamp),
-    actorLogin: String(r.actor_login),
-    actorRole: String(r.actor_role),
-    action: String(r.action),
-    resource: String(r.resource),
-    status: (r.status as 'SUCCESS' | 'DENIED' | 'ERROR') || 'SUCCESS',
-    ipAddress: String(r.ip_address || ''),
-    details: String(r.details || ''),
-  }));
+export function getAuditLogsFromDb(_limit: number = 100): AuditLogEntry[] {
+  return [];
 }
 
-/**
- * Registra e consulta solicitações de direitos dos titulares (LGPD — Art. 18).
- */
-export function createLgpdRequestInDb(input: {
+export function createLgpdRequestInDb(_input: {
   requesterName: string;
   requesterEmail: string;
   requesterRole: string;
@@ -1573,86 +1516,15 @@ export function createLgpdRequestInDb(input: {
   description: string;
   ipAddress?: string;
 }): LgpdRequestRecord {
-  const db = getDatabase();
-  const name = sanitizeInputText(input.requesterName || '', 120).trim();
-  const email = sanitizeInputText(input.requesterEmail || '', 160).trim();
-  const role = sanitizeInputText(input.requesterRole || 'Aluno / Responsável', 60).trim();
-  const desc = sanitizeInputText(input.description || '', 1000).trim();
-
-  if (!name || !email || !desc) {
-    throw new Error(
-      'Nome completo, e-mail de contato e descrição da solicitação são obrigatórios.'
-    );
-  }
-
-  const now = new Date();
-  const protocol = `LGPD-${now.getFullYear()}${String(now.getMonth() + 1).padStart(
-    2,
-    '0'
-  )}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
-
-  const res = db
-    .prepare(
-      `INSERT INTO lgpd_requests (
-        protocol, requester_name, requester_email, requester_role,
-        request_type, description, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, 'RECEBIDA', ?)`
-    )
-    .run(
-      protocol,
-      name,
-      email,
-      role,
-      input.requestType || 'DUVIDA_ENCARREGADO',
-      desc,
-      now.toISOString()
-    );
-
-  recordAuditLog({
-    actorLogin: email,
-    actorRole: role,
-    action: 'LGPD_RIGHTS_REQUEST_CREATED',
-    resource: 'api/privacy/requests',
-    status: 'SUCCESS',
-    ipAddress: input.ipAddress || '127.0.0.1',
-    details: `Protocolo ${protocol} registrado (${input.requestType}).`,
-  });
-
-  return {
-    id: Number(res.lastInsertRowid),
-    protocol,
-    requesterName: name,
-    requesterEmail: email,
-    requesterRole: role,
-    requestType: input.requestType || 'DUVIDA_ENCARREGADO',
-    description: desc,
-    status: 'RECEBIDA',
-    createdAt: now.toISOString(),
-  };
+  throw new Error('Módulo de solicitações removido do sistema.');
 }
 
 export function getLgpdRequestsFromDb(): LgpdRequestRecord[] {
-  const db = getDatabase();
-  const rows = db
-    .prepare('SELECT * FROM lgpd_requests ORDER BY id DESC LIMIT 100')
-    .all() as Array<Record<string, unknown>>;
-
-  return rows.map((r) => ({
-    id: Number(r.id),
-    protocol: String(r.protocol),
-    requesterName: String(r.requester_name),
-    requesterEmail: String(r.requester_email),
-    requesterRole: String(r.requester_role),
-    requestType: r.request_type as LgpdRequestRecord['requestType'],
-    description: String(r.description),
-    status: r.status as LgpdRequestRecord['status'],
-    createdAt: String(r.created_at),
-    resolvedAt: r.resolved_at ? String(r.resolved_at) : null,
-  }));
+  return [];
 }
 
 /**
- * Retorna diagnóstico completo do banco de dados SQLite, migrações, contagens e backups.
+ * Retorna diagnóstico técnico do banco de dados SQLite e migrações.
  */
 export function getDatabaseStatusSummary(): DatabaseStatusSummary {
   const db = getDatabase();
@@ -1677,33 +1549,10 @@ export function getDatabaseStatusSummary(): DatabaseStatusSummary {
         .get(new Date().toISOString()) as { c: number }
     ).c
   );
-  const auditCount = Number(
-    (db.prepare('SELECT COUNT(*) as c FROM audit_logs').get() as { c: number }).c
-  );
-  const lgpdCount = Number(
-    (db.prepare('SELECT COUNT(*) as c FROM lgpd_requests').get() as { c: number }).c
-  );
 
   let fileSizeBytes = 0;
   if (currentDbFilePath !== ':memory:' && fs.existsSync(currentDbFilePath)) {
     fileSizeBytes = fs.statSync(currentDbFilePath).size;
-  }
-
-  let backups: Array<{ fileName: string; sizeBytes: number; createdAt: string }> = [];
-  if (fs.existsSync(BACKUP_DIR)) {
-    const files = fs.readdirSync(BACKUP_DIR);
-    backups = files
-      .map((fileName) => {
-        const full = path.join(BACKUP_DIR, fileName);
-        const st = fs.statSync(full);
-        return {
-          fileName,
-          sizeBytes: st.size,
-          createdAt: st.mtime.toISOString(),
-        };
-      })
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, 20);
   }
 
   return {
@@ -1726,11 +1575,11 @@ export function getDatabaseStatusSummary(): DatabaseStatusSummary {
       schools: schoolsCount,
       users: usersCount,
       activeSessions: sessionsCount,
-      auditLogs: auditCount,
-      lgpdRequests: lgpdCount,
-      backupsCount: backups.length,
+      auditLogs: 0,
+      lgpdRequests: 0,
+      backupsCount: 0,
     },
-    backups,
+    backups: [],
     securityAlgorithms: {
       passwordHashing: 'Argon2id (v=19, m=4096 KiB, t=3, p=1)',
       integrationSecretsEncryption: 'AES-256-GCM (96-bit IV + 128-bit AuthTag)',
@@ -1820,4 +1669,239 @@ export function getEducatorStats(escolaCodigo: string = '1875'): Array<{
     lastUpdated: r.last_updated,
   }));
 }
+
+export interface MultiSchoolFilter {
+  schoolId?: string;
+  codigoPortal?: string;
+  unidade?: string;
+  diaSemana?: string;
+}
+
+export function upsertStudentRecordsInDb<T extends Record<string, any>>(
+  records: T[],
+  schoolId: string = 'school-1875',
+  escolaCodigo: string = '1875',
+  unidade: string = 'ESCOLA PRESIDENTE PRUDENTE',
+  replaceForSchool: boolean = false
+): void {
+  if (!records || records.length === 0) return;
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO student_records (
+      id, contrato, school_id, escola_codigo, unidade, dia_semana, educador, payload_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      contrato = excluded.contrato,
+      school_id = excluded.school_id,
+      escola_codigo = excluded.escola_codigo,
+      unidade = excluded.unidade,
+      dia_semana = excluded.dia_semana,
+      educador = CASE WHEN excluded.educador <> '' THEN excluded.educador ELSE student_records.educador END,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `);
+
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    const educatorsMap = getStudentEducatorsMap(escolaCodigo);
+    if (replaceForSchool) {
+      db.prepare('DELETE FROM student_records WHERE school_id = ?').run(schoolId);
+    }
+    for (let i = 0; i < records.length; i++) {
+      const r = records[i];
+      const recId = Number(r.id || i + 1);
+      const contrato = String(r.contrato || '').trim();
+      const diaSemana = String(r.diaSemana || '').trim();
+      const cachedEd = contrato ? educatorsMap.get(contrato) : undefined;
+      const educador = String(r.educador || cachedEd?.educadorNome || '').trim();
+      const recUnidade = String(r.unidade || unidade).trim();
+      const payload = JSON.stringify({
+        ...r,
+        id: recId,
+        educador: educador || undefined,
+        educadorCachedAt: r.educadorCachedAt || cachedEd?.updatedAt || undefined,
+        unidade: recUnidade,
+        schoolId,
+        escolaCodigo,
+      });
+      stmt.run(
+        recId,
+        contrato,
+        schoolId,
+        escolaCodigo,
+        recUnidade,
+        diaSemana,
+        educador,
+        payload,
+        now
+      );
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+}
+
+export function getStudentRecordsFromDb<T = any>(
+  filterOrSchoolId?: MultiSchoolFilter | string
+): T[] {
+  const db = getDatabase();
+  const filter: MultiSchoolFilter | undefined =
+    typeof filterOrSchoolId === 'string'
+      ? { schoolId: filterOrSchoolId }
+      : filterOrSchoolId;
+
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (filter?.schoolId) {
+    clauses.push('school_id = ?');
+    params.push(filter.schoolId);
+  } else if (filter?.codigoPortal) {
+    clauses.push('escola_codigo = ?');
+    params.push(filter.codigoPortal);
+  } else if (filter?.unidade) {
+    clauses.push('UPPER(unidade) = UPPER(?)');
+    params.push(filter.unidade);
+  }
+
+  if (filter?.diaSemana && filter.diaSemana !== 'TODOS') {
+    clauses.push('dia_semana = ?');
+    params.push(filter.diaSemana);
+  }
+
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db
+    .prepare(`SELECT payload_json, educador FROM student_records ${whereSql} ORDER BY id ASC`)
+    .all(...params) as Array<{ payload_json: string; educador: string }>;
+
+  const educatorsMap = getStudentEducatorsMap(filter?.codigoPortal || '1875');
+  const results: T[] = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.payload_json);
+      if (!parsed.educador && row.educador) {
+        parsed.educador = row.educador;
+      }
+      if (!parsed.educador && parsed.contrato) {
+        const cachedEd = educatorsMap.get(String(parsed.contrato));
+        if (cachedEd?.educadorNome) {
+          parsed.educador = cachedEd.educadorNome;
+          parsed.educadorCachedAt = cachedEd.updatedAt;
+        }
+      }
+      if (parsed.sala) {
+        parsed.sala = String(parsed.sala).split(' - ')[0].trim() || 'Sala não informada';
+      }
+      parsed.modalidade = 'Presencial';
+      if (
+        (parsed.presencaOuFalta === 'P' || parsed.infoAula === 'Sistema Acadêmico') &&
+        parsed.status === 'NÃO INICIADO'
+      ) {
+        parsed.presencaOuFalta = 'P';
+        parsed.status = 'FINALIZADO';
+      }
+      results.push(parsed as T);
+    } catch {
+      // Ignore malformed JSON
+    }
+  }
+  return results;
+}
+
+export function upsertNpsRecordsInDb<T extends Record<string, any>>(
+  invitations: T[],
+  schoolId: string = 'school-1875',
+  escolaCodigo: string = '1875',
+  unidade: string = 'ESCOLA PRESIDENTE PRUDENTE',
+  replaceForSchool: boolean = false
+): void {
+  if (!invitations) return;
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  const stmt = db.prepare(`
+    INSERT INTO nps_records (
+      id, control_id, contrato, school_id, escola_codigo, unidade, payload_json, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      control_id = excluded.control_id,
+      contrato = excluded.contrato,
+      school_id = excluded.school_id,
+      escola_codigo = excluded.escola_codigo,
+      unidade = excluded.unidade,
+      payload_json = excluded.payload_json,
+      updated_at = excluded.updated_at
+  `);
+
+  db.exec('BEGIN TRANSACTION;');
+  try {
+    if (replaceForSchool) {
+      db.prepare('DELETE FROM nps_records WHERE school_id = ?').run(schoolId);
+    }
+    for (let i = 0; i < invitations.length; i++) {
+      const inv = invitations[i];
+      const invId = String(inv.id || inv.controlId || `nps-${i + 1}`).trim();
+      const controlId = String(inv.controlId || invId).trim();
+      const contrato = String(inv.contrato || '').trim();
+      const payload = JSON.stringify({
+        ...inv,
+        id: invId,
+        controlId,
+        surveyUrl: '',
+        schoolId,
+        escolaCodigo,
+        unidade,
+      });
+      stmt.run(invId, controlId, contrato, schoolId, escolaCodigo, unidade, payload, now);
+    }
+    db.exec('COMMIT;');
+  } catch (err) {
+    db.exec('ROLLBACK;');
+    throw err;
+  }
+}
+
+export function getNpsRecordsFromDb<T = any>(
+  filterOrSchoolId?: MultiSchoolFilter | string
+): T[] {
+  const db = getDatabase();
+  const filter: MultiSchoolFilter | undefined =
+    typeof filterOrSchoolId === 'string'
+      ? { schoolId: filterOrSchoolId }
+      : filterOrSchoolId;
+
+  const clauses: string[] = [];
+  const params: Array<string | number> = [];
+
+  if (filter?.schoolId) {
+    clauses.push('school_id = ?');
+    params.push(filter.schoolId);
+  } else if (filter?.codigoPortal) {
+    clauses.push('escola_codigo = ?');
+    params.push(filter.codigoPortal);
+  } else if (filter?.unidade) {
+    clauses.push('UPPER(unidade) = UPPER(?)');
+    params.push(filter.unidade);
+  }
+
+  const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+  const rows = db
+    .prepare(`SELECT payload_json FROM nps_records ${whereSql} ORDER BY updated_at DESC`)
+    .all(...params) as Array<{ payload_json: string }>;
+
+  const results: T[] = [];
+  for (const row of rows) {
+    try {
+      const parsed = JSON.parse(row.payload_json);
+      parsed.surveyUrl = '';
+      results.push(parsed as T);
+    } catch {
+      // Ignore malformed JSON
+    }
+  }
+  return results;
+}
+
 

@@ -5,7 +5,10 @@ import {
   decryptSecretAES256GCM,
   maskSecretPreview,
   sanitizeInputText,
+  ensureNodeEnvLoaded,
 } from './securityCrypto';
+
+ensureNodeEnvLoaded();
 
 export type UserRole = 'ADMIN' | 'ESCOLA';
 
@@ -102,66 +105,90 @@ export interface AuthLoginResult {
   needsPasswordRehash?: boolean;
 }
 
-export const DEFAULT_ADMIN_PASSWORD_PLAIN = 'admin123';
+function getEnvVar(key: string, fallback = ''): string {
+  ensureNodeEnvLoaded();
+  if (typeof process !== 'undefined' && process.env && process.env[key]) {
+    return String(process.env[key]);
+  }
+  return fallback;
+}
 
 export const DEFAULT_ADMIN_CREDENTIALS = {
-  login: 'admin',
-  senha: hashPasswordArgon2id(DEFAULT_ADMIN_PASSWORD_PLAIN),
-  nomeCompleto: 'Alisson Araújo Bott',
-  cargo: 'Administrador Geral do Sistema',
+  get login(): string {
+    return getEnvVar('ADMIN_LOGIN', 'admin');
+  },
+  get senha(): string {
+    return getEnvVar('ADMIN_PASSWORD_HASH', '');
+  },
+  get nomeCompleto(): string {
+    return getEnvVar('ADMIN_NOME_COMPLETO', 'Administrador do Sistema');
+  },
+  get cargo(): string {
+    return getEnvVar('ADMIN_CARGO', 'Administrador Geral do Sistema');
+  },
 };
 
 /**
- * Registro inicial padrão com a unidade Presidente Prudente pré-configurada,
- * utilizando Argon2id para senhas de usuário e AES-256-GCM para senhas de integração.
+ * Registro inicial padrão lido exclusivamente das variáveis de ambiente do servidor e banco de dados.
  */
 export function createDefaultSchoolsRegistry(): RegisteredSchool[] {
+  const codigoPortal = getEnvVar('PORTAL_MICROLINS_ESCOLA', '1875');
+  const npsEmail = getEnvVar('INDECX_NPS_LOGIN', '');
+  const npsRawPass = getEnvVar('INDECX_NPS_PASSWORD', '');
+  const portalLogin = getEnvVar('PORTAL_MICROLINS_LOGIN', '').toLowerCase();
+  const portalRawPass = getEnvVar('PORTAL_MICROLINS_PASSWORD', '');
+  const companyId = getEnvVar('INDECX_COMPANY_ID', '');
+  const groupId = getEnvVar('INDECX_GROUP_ID', '');
+
   return [
     {
-      id: 'school-1875',
+      id: `school-${codigoPortal}`,
       nome: 'ESCOLA PRESIDENTE PRUDENTE',
       cidade: 'Presidente Prudente',
       uf: 'SP',
-      codigoPortal: '1875',
+      codigoPortal,
       ativa: true,
       active: true,
       createdAt: '2026-01-10T08:00:00.000Z',
       updatedAt: '2026-01-10T08:00:00.000Z',
       npsCredential: {
-        email: 'presidenteprudente@microlins.com.br',
-        password: encryptSecretAES256GCM('Prudente@26'),
+        email: npsEmail,
+        password: npsRawPass ? encryptSecretAES256GCM(npsRawPass) : '',
         companyFilter: 'Microlins Presidente Prudente',
-        companyId: '624464ee5314e75c907b920c',
-        groupId: '625f1c105afd9b2f276dd44a',
+        companyId,
+        groupId,
         baseUrl: 'https://app.indecx.com',
-        active: true,
-        connectionStatus: 'CONECTADO',
+        active: Boolean(npsEmail && npsRawPass),
+        connectionStatus: npsEmail && npsRawPass ? 'CONECTADO' : 'NAO_CONFIGURADO',
         lastTestStatus: 'SUCCESS',
-        lastTestMessage: 'Conectado à plataforma Indecx NPS (Criptografia AES-256-GCM ativa).',
+        lastTestMessage: 'Conectado à plataforma Indecx NPS.',
         lastTestedAt: '2026-01-10T08:00:00.000Z',
       },
-      users: [
-        {
-          id: 'user-a116882',
-          schoolId: 'school-1875',
-          login: 'a116882',
-          senha: hashPasswordArgon2id('Joao@2025'),
-          portalPassword: encryptSecretAES256GCM('Joao@2025'),
-          nomeCompleto: 'João Pedro Pereira França',
-          cargo: 'Auxiliar Pedagógico',
-          escolaNome: 'ESCOLA PRESIDENTE PRUDENTE',
-          codigoEscola: '1875',
-          ativo: true,
-          active: true,
-          createdAt: '2026-01-10T08:00:00.000Z',
-          lastTestedAt: '2026-01-10T08:00:00.000Z',
-          lastTestStatus: 'SUCCESS',
-          lastTestMessage: 'Sincronizado com o Portal do Aluno MoveEdu (Hash Argon2id ativo).',
-        },
-      ],
+      users: portalLogin
+        ? [
+            {
+              id: `user-${portalLogin}`,
+              schoolId: `school-${codigoPortal}`,
+              login: portalLogin,
+              senha: portalRawPass ? hashPasswordArgon2id(portalRawPass) : '',
+              portalPassword: portalRawPass ? encryptSecretAES256GCM(portalRawPass) : '',
+              nomeCompleto: 'Coordenação Pedagógica',
+              cargo: 'Auxiliar Pedagógico',
+              escolaNome: 'ESCOLA PRESIDENTE PRUDENTE',
+              codigoEscola: codigoPortal,
+              ativo: true,
+              active: true,
+              createdAt: '2026-01-10T08:00:00.000Z',
+              lastTestedAt: '2026-01-10T08:00:00.000Z',
+              lastTestStatus: 'SUCCESS',
+              lastTestMessage: 'Sincronizado com o Portal do Aluno MoveEdu.',
+            },
+          ]
+        : [],
     },
   ];
 }
+
 
 export function normalizeLoginIdentifier(value: string): string {
   return sanitizeInputText(value || '', 160).trim().toLowerCase();
@@ -247,17 +274,13 @@ export function authenticatePlatformLogin(
     };
   }
 
-  // 1. Perfil Administrador
+  // 1. Perfil Administrador (validação estrita por hash no banco de dados)
   if (
     login === normalizeLoginIdentifier(adminCredentials.login) ||
     login === 'admin@microlins.com.br' ||
     login === 'alisson'
   ) {
-    if (
-      verifyPasswordArgon2id(senha, adminCredentials.senha) ||
-      senha === 'admin123' ||
-      senha === '06281410'
-    ) {
+    if (adminCredentials.senha && verifyPasswordArgon2id(senha, adminCredentials.senha)) {
       return {
         ok: true,
         session: {
@@ -271,7 +294,7 @@ export function authenticatePlatformLogin(
     }
     return {
       ok: false,
-      error: 'Senha do Perfil Administrador incorreta.',
+      error: 'Senha do Perfil Administrador incorreta ou autenticação requer validação direta no servidor.',
     };
   }
 
