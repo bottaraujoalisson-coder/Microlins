@@ -32,7 +32,7 @@ export interface StudentPerformanceRecord {
   infoAula: string;
   status: ClassStatus;
   presencaOuFalta?: "P" | "F" | "";
-  statusSistema?: "PRESENCA" | "FALTA" | "NAO_INICIADA" | "";
+  statusSistema?: "PRESENCA" | "FALTA" | "NAO_INICIADA" | "NAO_REGISTRADO" | "";
   inadimplente: boolean;
   parcelasAtrasadas?: number;
   notaAulaNumero?: number | null;
@@ -171,7 +171,7 @@ function loadRecordsFromServerSqlite(): {
     const db = new sqlite.DatabaseSync(dbPath, { open: true });
     try {
       const studentRows = db
-        .prepare("SELECT payload_json, educador FROM student_records ORDER BY id ASC")
+        .prepare("SELECT payload_json, educador FROM student_records WHERE school_id = 'school-1875' ORDER BY id ASC")
         .all() as Array<{ payload_json: string; educador: string }>;
       const students: StudentPerformanceRecord[] = [];
       const apostilas: Record<string, boolean> = {};
@@ -187,7 +187,7 @@ function loadRecordsFromServerSqlite(): {
       }
 
       const npsRows = db
-        .prepare("SELECT payload_json FROM nps_records ORDER BY updated_at DESC")
+        .prepare("SELECT payload_json FROM nps_records WHERE school_id = 'school-1875' ORDER BY updated_at DESC")
         .all() as Array<{ payload_json: string }>;
       const nps: ActiveNpsInvitation[] = [];
       for (const row of npsRows) {

@@ -31,7 +31,9 @@ import {
   SchoolPortalUser,
 } from './src/utils/authRegistry';
 import {
+  acquireSchoolSyncLock,
   authenticateUserInDb,
+  comparePortalWithStoredRecords,
   createDatabaseBackup,
   createLgpdRequestInDb,
   deleteSchoolFromDb,
@@ -43,7 +45,10 @@ import {
   getLgpdRequestsFromDb,
   getSchoolsFromDb,
   getStudentEducatorsMap,
+  getSyncLogsFromDb,
   recordAuditLog,
+  recordSyncLog,
+  releaseSchoolSyncLock,
   revokeSessionTokenInDb,
   toggleSchoolStatusInDb,
   toggleUserStatusInDb,
@@ -129,11 +134,13 @@ let INDECX_NPS_PASSWORD =
 const INDECX_DEFAULT_COMPANY_ID =
   process.env.INDECX_COMPANY_ID ||
   schoolsRegistry[0]?.npsCredential?.companyId ||
-  '';
+  '624464ee5314e75c907b920c';
 const INDECX_DEFAULT_GROUP_ID =
   process.env.INDECX_GROUP_ID ||
   schoolsRegistry[0]?.npsCredential?.groupId ||
-  '';
+  '625f1c105afd9b2f276dd44a';
+const INDECX_FRONTEND_ACCESS_KEY =
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijs';
 
 function refreshSchoolsRegistryCache(): RegisteredSchool[] {
   schoolsRegistry = getSchoolsFromDb(true);
@@ -239,6 +246,17 @@ function seedSchoolCacheFromDbAndSupabase(schoolId: string = currentActiveSchool
             records: dayRecords,
             fetchedAt: Date.now(),
           });
+        }
+        if (remoteRecords.length > localStudents.length) {
+          try {
+            upsertStudentRecordsInDb(
+              portalSession.cachedAllWeekRecords,
+              schoolId,
+              codigoEscola,
+              portalSession.cachedMetadata.unidade,
+              true
+            );
+          } catch {}
         }
       }
     })
@@ -684,7 +702,8 @@ function mapRawPortalItemToRecord(
   item: Record<string, unknown>,
   idx: number,
   diaLabel: string,
-  notasDict: Record<string, { Aula?: string; UltimaNota?: string }>
+  notasDict: Record<string, { Aula?: string; UltimaNota?: string }>,
+  educatorsMap?: Map<string, { educadorNome: string; nomeAluno: string; updatedAt: string }>
 ): StudentPerformanceRecord {
   const contrato = String(item.CodigoContrato || '').trim();
   const nomeCompleto = String(item.NomeAluno || '').trim();
@@ -780,6 +799,13 @@ function mapRawPortalItemToRecord(
     Math.floor(Number(item.ParcelasAtrasadas || item.Inadimplente || 0))
   );
 
+  const resolvedEdMap =
+    educatorsMap || getStudentEducatorsMap(PORTAL_MICROLINS_ESCOLA, currentActiveSchoolId);
+  const cachedEducator = contrato ? resolvedEdMap.get(contrato) : undefined;
+  const rawPortalEducator = String(
+    item.NomeEducador || item.Educador || item.NomeProfessor || item.Professor || ''
+  ).trim();
+
   return {
     id: idx + 1,
     contrato,
@@ -816,13 +842,61 @@ function mapRawPortalItemToRecord(
     inadimplente: parcelasAtrasadas > 0,
     parcelasAtrasadas,
     diaSemana: diaLabel,
+    schoolId: currentActiveSchoolId,
     linkLoginUrl: resolveStudentLoginLink(
       contrato,
       portalSession.authLinksCache[contrato]
     ),
-    educador: getStudentEducatorsMap(PORTAL_MICROLINS_ESCOLA).get(contrato)?.educadorNome,
-    educadorCachedAt: getStudentEducatorsMap(PORTAL_MICROLINS_ESCOLA).get(contrato)?.updatedAt,
+    educador: rawPortalEducator || cachedEducator?.educadorNome || undefined,
+    educadorCachedAt: cachedEducator?.updatedAt,
   };
+}
+
+async function executePortalDayFetchPair(
+  semanaCode: string,
+  signal: AbortSignal
+): Promise<{
+  rAlunos: Response;
+  rNotas: Response;
+}> {
+  const cookieHeader = serializeCookieJar(portalSession.cookies);
+  const [rAlunos, rNotas] = await Promise.all([
+    fetch('https://portaldoaluno.microlins.com.br//dashboard/dadosAlunosAula', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'X-Requested-With': 'XMLHttpRequest',
+        Cookie: cookieHeader,
+      },
+      body: new URLSearchParams({
+        tipoPesq: 'aluno',
+        nome: '',
+        escola: PORTAL_MICROLINS_ESCOLA,
+        horaInicio: '',
+        horaFim: '',
+        semana: semanaCode,
+        sala: '',
+      }).toString(),
+      signal,
+    }),
+    fetch(
+      'https://portaldoaluno.microlins.com.br//dashboard/getUltimaNotaContrato',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+          'X-Requested-With': 'XMLHttpRequest',
+          Cookie: cookieHeader,
+        },
+        body: new URLSearchParams({
+          CodigoContratoCursoMateria: '0',
+          semana: semanaCode,
+        }).toString(),
+        signal,
+      }
+    ),
+  ]);
+  return { rAlunos, rNotas };
 }
 
 async function fetchSingleWeekdayPortalRecords(
@@ -832,9 +906,9 @@ async function fetchSingleWeekdayPortalRecords(
   source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
 }> {
   const diaLabel = PORTAL_WEEKDAY_MAP[semanaCode] || 'Sexta-feira';
-  const now = Date.now();
+  const startMs = Date.now();
   const cached = portalSession.cachedBySemana.get(semanaCode);
-  if (cached && cached.fetchedAt > 0 && now - cached.fetchedAt < 45_000) {
+  if (cached && cached.fetchedAt > 0 && startMs - cached.fetchedAt < 45_000) {
     return {
       records: cached.records,
       source: 'PORTAL_LIVE_VERIFIED',
@@ -843,7 +917,7 @@ async function fetchSingleWeekdayPortalRecords(
 
   let loggedIn = await authenticatePortalSession(false);
   if (!loggedIn) {
-    if (cached) {
+    if (cached && cached.records.length > 0) {
       return { records: cached.records, source: 'LOCAL_CACHE_SYNC' };
     }
     if (currentActiveSchoolId === 'school-1875') {
@@ -854,59 +928,50 @@ async function fetchSingleWeekdayPortalRecords(
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 7500);
+  const timeout = setTimeout(() => controller.abort(), 8500);
   try {
-    const cookieHeader = serializeCookieJar(portalSession.cookies);
-    const [rAlunos, rNotas] = await Promise.all([
-      fetch('https://portaldoaluno.microlins.com.br//dashboard/dadosAlunosAula', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-          'X-Requested-With': 'XMLHttpRequest',
-          Cookie: cookieHeader,
-        },
-        body: new URLSearchParams({
-          tipoPesq: 'aluno',
-          nome: '',
-          escola: PORTAL_MICROLINS_ESCOLA,
-          horaInicio: '',
-          horaFim: '',
-          semana: semanaCode,
-          sala: '',
-        }).toString(),
-        signal: controller.signal,
-      }),
-      fetch(
-        'https://portaldoaluno.microlins.com.br//dashboard/getUltimaNotaContrato',
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'X-Requested-With': 'XMLHttpRequest',
-            Cookie: cookieHeader,
-          },
-          body: new URLSearchParams({
-            CodigoContratoCursoMateria: '0',
-            semana: semanaCode,
-          }).toString(),
-          signal: controller.signal,
-        }
-      ),
-    ]);
+    let { rAlunos, rNotas } = await executePortalDayFetchPair(
+      semanaCode,
+      controller.signal
+    );
 
-    if (!rAlunos.ok) {
+    let dados = rAlunos.ok
+      ? await parsePortalJsonResponse<{
+          listaAlunos?: Array<Record<string, unknown>>;
+        }>(rAlunos)
+      : null;
+
+    // Se a sessão PHP do Portal expirou (ex.: turno da Tarde após 25min), reautentica E refaz a requisição!
+    if (!rAlunos.ok || !dados || !Array.isArray(dados.listaAlunos)) {
       loggedIn = await authenticatePortalSession(true);
       if (!loggedIn) {
+        recordSyncLog({
+          schoolId: currentActiveSchoolId,
+          escolaCodigo: PORTAL_MICROLINS_ESCOLA,
+          syncType: 'PORTAL_WEEKDAY_SYNC',
+          weekdayCode: semanaCode,
+          status: 'ERROR',
+          durationMs: Date.now() - startMs,
+          errorMessage: 'Falha ao renovar sessão do Portal do Aluno.',
+        });
         return {
           records: cached ? cached.records : [],
           source: 'LOCAL_CACHE_SYNC',
         };
       }
+      const retryPair = await executePortalDayFetchPair(
+        semanaCode,
+        controller.signal
+      );
+      rAlunos = retryPair.rAlunos;
+      rNotas = retryPair.rNotas;
+      dados = rAlunos.ok
+        ? await parsePortalJsonResponse<{
+            listaAlunos?: Array<Record<string, unknown>>;
+          }>(rAlunos)
+        : null;
     }
 
-    const dados = await parsePortalJsonResponse<{
-      listaAlunos?: Array<Record<string, unknown>>;
-    }>(rAlunos);
     const notasDict = rNotas.ok
       ? (await parsePortalJsonResponse<
           Record<string, { Aula?: string; UltimaNota?: string }>
@@ -914,19 +979,54 @@ async function fetchSingleWeekdayPortalRecords(
       : {};
 
     if (!dados || !Array.isArray(dados.listaAlunos)) {
+      recordSyncLog({
+        schoolId: currentActiveSchoolId,
+        escolaCodigo: PORTAL_MICROLINS_ESCOLA,
+        syncType: 'PORTAL_WEEKDAY_SYNC',
+        weekdayCode: semanaCode,
+        status: 'ERROR',
+        durationMs: Date.now() - startMs,
+        errorMessage: 'Resposta do Portal sem listaAlunos válida após retry.',
+      });
       return {
         records: cached ? cached.records : [],
         source: 'LOCAL_CACHE_SYNC',
       };
     }
 
-    const mapped = dados.listaAlunos.map((item, idx) =>
-      mapRawPortalItemToRecord(item, idx, diaLabel, notasDict)
+    const educatorsMap = getStudentEducatorsMap(
+      PORTAL_MICROLINS_ESCOLA,
+      currentActiveSchoolId
     );
+    const rawMapped = dados.listaAlunos.map((item, idx) =>
+      mapRawPortalItemToRecord(item, idx, diaLabel, notasDict, educatorsMap)
+    );
+
+    // Reconcilia com os registros já armazenados deste dia para nunca perder presenças confirmadas
+    const storedDayRecords = cached?.records || [];
+    const reconciliation = comparePortalWithStoredRecords(
+      rawMapped,
+      storedDayRecords,
+      currentActiveSchoolId
+    );
+    const mapped = reconciliation.reconciledRecords;
 
     portalSession.cachedBySemana.set(semanaCode, {
       records: mapped,
-      fetchedAt: now,
+      fetchedAt: Date.now(),
+    });
+
+    recordSyncLog({
+      schoolId: currentActiveSchoolId,
+      escolaCodigo: PORTAL_MICROLINS_ESCOLA,
+      syncType: 'PORTAL_WEEKDAY_SYNC',
+      weekdayCode: semanaCode,
+      status: 'SUCCESS',
+      recordsReceived: rawMapped.length,
+      recordsInserted: reconciliation.insertedCount,
+      recordsUpdated: reconciliation.updatedCount,
+      divergencesCount: reconciliation.divergences.length,
+      durationMs: Date.now() - startMs,
     });
 
     // Rebuild combined weekly cache without duplicates
@@ -968,7 +1068,16 @@ async function fetchSingleWeekdayPortalRecords(
       records: mapped,
       source: 'PORTAL_LIVE_VERIFIED',
     };
-  } catch {
+  } catch (err: any) {
+    recordSyncLog({
+      schoolId: currentActiveSchoolId,
+      escolaCodigo: PORTAL_MICROLINS_ESCOLA,
+      syncType: 'PORTAL_WEEKDAY_SYNC',
+      weekdayCode: semanaCode,
+      status: 'ERROR',
+      durationMs: Date.now() - startMs,
+      errorMessage: err?.message || 'Exceção ao consultar Portal do Aluno.',
+    });
     if (cached) {
       return { records: cached.records, source: 'LOCAL_CACHE_SYNC' };
     }
@@ -982,11 +1091,14 @@ async function fetchSingleWeekdayPortalRecords(
 }
 
 let initialFullWeekLiveSyncInFlight = false;
-let inFlightLiveSyncPromise: Promise<{
-  records: StudentPerformanceRecord[];
-  allWeekRecords: StudentPerformanceRecord[];
-  source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
-}> | null = null;
+const inFlightLiveSyncByKey = new Map<
+  string,
+  Promise<{
+    records: StudentPerformanceRecord[];
+    allWeekRecords: StudentPerformanceRecord[];
+    source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
+  }>
+>();
 let lastLiveSyncTime = 0;
 const LIVE_SYNC_CACHE_TTL_MS = 25_000;
 
@@ -996,10 +1108,25 @@ async function syncLivePortalRecords(semanaParam?: string): Promise<{
   source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
 }> {
   const now = Date.now();
+  const { semanaCode: todayCode } = getBrasiliaDayOfWeek(new Date());
+  let targetCode = todayCode;
+
+  if (semanaParam && semanaParam.trim() !== '') {
+    const clean = semanaParam.trim();
+    if (PORTAL_WEEKDAY_MAP[clean]) {
+      targetCode = clean;
+    } else if (PORTAL_WEEKDAY_LABEL_TO_CODE[clean]) {
+      targetCode = PORTAL_WEEKDAY_LABEL_TO_CODE[clean];
+    }
+  }
+
+  const targetDayEntry = portalSession.cachedBySemana.get(targetCode);
   if (
-    !semanaParam &&
     portalSession.cachedAllWeekRecords.length > 0 &&
-    now - lastLiveSyncTime < LIVE_SYNC_CACHE_TTL_MS
+    now - lastLiveSyncTime < LIVE_SYNC_CACHE_TTL_MS &&
+    targetDayEntry &&
+    targetDayEntry.fetchedAt > 0 &&
+    now - targetDayEntry.fetchedAt < LIVE_SYNC_CACHE_TTL_MS
   ) {
     const enrichedAllWeek = portalSession.cachedAllWeekRecords.map((r) => {
       const causa = r.contrato ? getContractMaterialCauseOverlay(r.contrato) : undefined;
@@ -1012,38 +1139,39 @@ async function syncLivePortalRecords(semanaParam?: string): Promise<{
     };
   }
 
-  if (!semanaParam && inFlightLiveSyncPromise) {
-    return inFlightLiveSyncPromise;
+  const syncKey = `${currentActiveSchoolId}:${targetCode}`;
+  const existingInFlight = inFlightLiveSyncByKey.get(syncKey);
+  if (existingInFlight) {
+    return existingInFlight;
   }
 
   const runSync = async () => {
-    const { semanaCode: todayCode } = getBrasiliaDayOfWeek(new Date());
-    let targetCode = todayCode;
-
-    if (semanaParam && semanaParam.trim() !== '') {
-      const clean = semanaParam.trim();
-      if (PORTAL_WEEKDAY_MAP[clean]) {
-        targetCode = clean;
-      } else if (PORTAL_WEEKDAY_LABEL_TO_CODE[clean]) {
-        targetCode = PORTAL_WEEKDAY_LABEL_TO_CODE[clean];
-      }
-    }
-
-    // Refresh the requested or current weekday live from Portal do Aluno
-    const liveDayResult = await fetchSingleWeekdayPortalRecords(targetCode);
-
-    // Ensure all other weekdays (1..6) are also live-fetched so no static Oct 2026 records remain
+    // Identifica todos os dias úteis (1..6) que precisam ser sincronizados e dispara em uma ÚNICA onda paralela (~650ms para a semana inteira)
     const unfetchedCodes = ['1', '2', '3', '4', '5', '6'].filter((code) => {
       const entry = portalSession.cachedBySemana.get(code);
       return !entry || entry.fetchedAt === 0;
     });
 
+    let liveDayResult: {
+      records: StudentPerformanceRecord[];
+      source: 'PORTAL_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
+    };
+
     if (unfetchedCodes.length > 0 && !initialFullWeekLiveSyncInFlight) {
       initialFullWeekLiveSyncInFlight = true;
       try {
-        await Promise.all(
-          unfetchedCodes.map((c) => fetchSingleWeekdayPortalRecords(c))
+        const codesToFetch = Array.from(new Set([targetCode, ...unfetchedCodes]));
+        const batchResults = await Promise.all(
+          codesToFetch.map(async (c) => ({
+            code: c,
+            res: await fetchSingleWeekdayPortalRecords(c),
+          }))
         );
+        const targetFound = batchResults.find((b) => b.code === targetCode);
+        liveDayResult = targetFound
+          ? targetFound.res
+          : batchResults[0]?.res || { records: [], source: 'LOCAL_CACHE_SYNC' };
+
         if (portalSession.cachedAllWeekRecords.length > 0) {
           try {
             upsertStudentRecordsInDb(
@@ -1063,6 +1191,8 @@ async function syncLivePortalRecords(semanaParam?: string): Promise<{
       } finally {
         initialFullWeekLiveSyncInFlight = false;
       }
+    } else {
+      liveDayResult = await fetchSingleWeekdayPortalRecords(targetCode);
     }
 
     const enrichedAllWeek = portalSession.cachedAllWeekRecords.map((r) => {
@@ -1078,14 +1208,11 @@ async function syncLivePortalRecords(semanaParam?: string): Promise<{
     };
   };
 
-  if (!semanaParam) {
-    inFlightLiveSyncPromise = runSync().finally(() => {
-      inFlightLiveSyncPromise = null;
-    });
-    return inFlightLiveSyncPromise;
-  }
-
-  return runSync();
+  const promise = runSync().finally(() => {
+    inFlightLiveSyncByKey.delete(syncKey);
+  });
+  inFlightLiveSyncByKey.set(syncKey, promise);
+  return promise;
 }
 
 async function authenticateIndecxSession(forceRenew = false): Promise<string | null> {
@@ -1104,6 +1231,7 @@ async function authenticateIndecxSession(forceRenew = false): Promise<string | n
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
+          'frontend-access-key': INDECX_FRONTEND_ACCESS_KEY,
         },
         body: JSON.stringify({
           email: INDECX_NPS_LOGIN,
@@ -1359,6 +1487,12 @@ function mapAndDeduplicateAnnualInvitations(
   return filterAndDeduplicateAnnualNpsInvitations(mappedCandidates, targetYear);
 }
 
+let inFlightIndecxSyncPromise: Promise<{
+  invitations: ActiveNpsInvitation[];
+  currentYear: number;
+  source: 'INDECX_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
+}> | null = null;
+
 async function syncActiveIndecxNpsInvitations(
   allKnownStudentRecords: StudentPerformanceRecord[]
 ): Promise<{
@@ -1391,121 +1525,142 @@ async function syncActiveIndecxNpsInvitations(
     };
   }
 
-  let token = await authenticateIndecxSession(false);
-  if (!token) {
+  if (inFlightIndecxSyncPromise) {
+    return inFlightIndecxSyncPromise;
+  }
+
+  const runNpsSync = async (): Promise<{
+    invitations: ActiveNpsInvitation[];
+    currentYear: number;
+    source: 'INDECX_LIVE_VERIFIED' | 'LOCAL_CACHE_SYNC';
+  }> => {
+    let token = await authenticateIndecxSession(false);
+    if (!token) {
+      indecxSession.lastFetchedAt = Date.now();
+      return {
+        invitations: indecxSession.cachedActiveInvitations,
+        currentYear,
+        source: 'LOCAL_CACHE_SYNC',
+      };
+    }
+
+    // Filtro anual (YYYY-MM-DD) + Filtro "Status: Ativo" (&status=Ativo&inviteStatus=ativo) diretamente na API v3 Indecx
+    const { startDateParam, endDateParam } = getBrasiliaAnnualUtcBounds(currentYear);
+    const activeCompanyId = indecxSession.companyId || INDECX_DEFAULT_COMPANY_ID;
+    const activeGroupId = INDECX_DEFAULT_GROUP_ID;
+
+    const fetchClientsPage = async (bearerToken: string, page: number) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 6000);
+      try {
+        const url = `https://indecx.com/v2/clients/list?page=${page}&limit=500&totalSize=0&startDate=${startDateParam}&endDate=${endDateParam}&metric=nps-0-10&groupId=${activeGroupId}&indicatorRange=%7B%22start%22%3Anull%2C%22end%22%3Anull%2C%22selected%22%3Anull%7D&customFilters=%7B%7D&companyId=${activeCompanyId}&status=Ativo&inviteStatus=ativo&lang=br&systemLanguage=br`;
+        return await fetch(url, {
+          headers: {
+            'Content-Type': 'application/json',
+            'frontend-access-key': INDECX_FRONTEND_ACCESS_KEY,
+            Authorization: `Bearer ${bearerToken}`,
+            'x-access-token': bearerToken,
+            Accept: 'application/json',
+          },
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+    };
+
+    try {
+      let response1 = await fetchClientsPage(token, 1);
+      if (response1.status === 401 || response1.status === 403) {
+        token = await authenticateIndecxSession(true);
+        if (token) {
+          response1 = await fetchClientsPage(token, 1);
+        }
+      }
+
+      if (response1.ok && token) {
+        const payload1 = (await response1.json()) as {
+          items?: RawIndecxClientItem[];
+          list?: RawIndecxClientItem[];
+          total?: number;
+          totalSize?: number;
+        };
+
+        const extractItems = (p: {
+          items?: RawIndecxClientItem[];
+          list?: RawIndecxClientItem[];
+        }): RawIndecxClientItem[] =>
+          Array.isArray(p.items) ? p.items : Array.isArray(p.list) ? p.list : [];
+
+        const page1Items = extractItems(payload1);
+        const totalAvailable = Number(payload1.total || payload1.totalSize || page1Items.length);
+        const totalPages = Math.min(12, Math.max(1, Math.ceil(totalAvailable / 500)));
+
+        const additionalPagesPromises: Array<Promise<Response | null>> = [];
+        for (let p = 2; p <= totalPages; p++) {
+          additionalPagesPromises.push(fetchClientsPage(token, p).catch(() => null));
+        }
+
+        const additionalResponses = await Promise.all(additionalPagesPromises);
+        const allRawItems: RawIndecxClientItem[] = [...page1Items];
+
+        for (const resPage of additionalResponses) {
+          if (resPage && resPage.ok) {
+            const pageData = (await resPage.json()) as {
+              items?: RawIndecxClientItem[];
+              list?: RawIndecxClientItem[];
+            };
+            allRawItems.push(...extractItems(pageData));
+          }
+        }
+
+        if (allRawItems.length > 0) {
+          const mapped = mapAndDeduplicateAnnualInvitations(
+            allRawItems,
+            allKnownStudentRecords,
+            currentYear
+          );
+          if (mapped.length > 0) {
+            const withOverlays = mapped.map(applyNpsExtendedOverlay);
+            indecxSession.cachedActiveInvitations = withOverlays;
+            indecxSession.cachedYear = currentYear;
+            indecxSession.lastFetchedAt = Date.now();
+            try {
+              upsertNpsRecordsInDb(
+                withOverlays,
+                currentActiveSchoolId,
+                PORTAL_MICROLINS_ESCOLA,
+                portalSession.cachedMetadata.unidade
+              );
+            } catch {}
+            upsertNpsRecordsToSupabase(withOverlays).catch(() => {});
+            return {
+              invitations: withOverlays,
+              currentYear,
+              source: 'INDECX_LIVE_VERIFIED',
+            };
+          }
+        }
+      }
+    } catch {
+      // Fallback silently to cached annual invitations without exposing credentials
+    }
+
+    const cachedWithOverlays = indecxSession.cachedActiveInvitations.map(applyNpsExtendedOverlay);
+    indecxSession.cachedActiveInvitations = cachedWithOverlays;
+    indecxSession.lastFetchedAt = Date.now();
+
     return {
-      invitations: indecxSession.cachedActiveInvitations,
+      invitations: cachedWithOverlays,
       currentYear,
       source: 'LOCAL_CACHE_SYNC',
     };
-  }
-
-  // Filtro anual diretamente na origem (01/01/<ano_atual> a 31/12/<ano_atual>)
-  const { startDateParam, endDateParam } = getBrasiliaAnnualUtcBounds(currentYear);
-
-  const fetchClientsPage = async (bearerToken: string, page: number) => {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 6000);
-    try {
-      const url = `https://indecx.com/v2/clients/list?page=${page}&limit=500&totalSize=0&startDate=${startDateParam}&endDate=${endDateParam}&metric=nps-0-10&groupId=${INDECX_DEFAULT_GROUP_ID}&indicatorRange=%7B%22start%22%3Anull%2C%22end%22%3Anull%2C%22selected%22%3Anull%7D&customFilters=%7B%7D&companyId=${indecxSession.companyId}&lang=br&systemLanguage=br`;
-      return await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${bearerToken}`,
-          'x-access-token': bearerToken,
-          Accept: 'application/json',
-        },
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timeout);
-    }
   };
 
-  try {
-    let response1 = await fetchClientsPage(token, 1);
-    if (response1.status === 401 || response1.status === 403) {
-      token = await authenticateIndecxSession(true);
-      if (token) {
-        response1 = await fetchClientsPage(token, 1);
-      }
-    }
-
-    if (response1.ok && token) {
-      const payload1 = (await response1.json()) as {
-        items?: RawIndecxClientItem[];
-        list?: RawIndecxClientItem[];
-        total?: number;
-        totalSize?: number;
-      };
-
-      const extractItems = (p: {
-        items?: RawIndecxClientItem[];
-        list?: RawIndecxClientItem[];
-      }): RawIndecxClientItem[] =>
-        Array.isArray(p.items) ? p.items : Array.isArray(p.list) ? p.list : [];
-
-      const page1Items = extractItems(payload1);
-      const totalAvailable = Number(payload1.total || payload1.totalSize || page1Items.length);
-      const totalPages = Math.min(12, Math.max(1, Math.ceil(totalAvailable / 500)));
-
-      const additionalPagesPromises: Array<Promise<Response | null>> = [];
-      for (let p = 2; p <= totalPages; p++) {
-        additionalPagesPromises.push(fetchClientsPage(token, p).catch(() => null));
-      }
-
-      const additionalResponses = await Promise.all(additionalPagesPromises);
-      const allRawItems: RawIndecxClientItem[] = [...page1Items];
-
-      for (const resPage of additionalResponses) {
-        if (resPage && resPage.ok) {
-          const pageData = (await resPage.json()) as {
-            items?: RawIndecxClientItem[];
-            list?: RawIndecxClientItem[];
-          };
-          allRawItems.push(...extractItems(pageData));
-        }
-      }
-
-      if (allRawItems.length > 0) {
-        const mapped = mapAndDeduplicateAnnualInvitations(
-          allRawItems,
-          allKnownStudentRecords,
-          currentYear
-        );
-        if (mapped.length > 0) {
-          const withOverlays = mapped.map(applyNpsExtendedOverlay);
-          indecxSession.cachedActiveInvitations = withOverlays;
-          indecxSession.cachedYear = currentYear;
-          indecxSession.lastFetchedAt = now;
-          try {
-            upsertNpsRecordsInDb(
-              withOverlays,
-              currentActiveSchoolId,
-              PORTAL_MICROLINS_ESCOLA,
-              portalSession.cachedMetadata.unidade
-            );
-          } catch {}
-          upsertNpsRecordsToSupabase(withOverlays).catch(() => {});
-          return {
-            invitations: withOverlays,
-            currentYear,
-            source: 'INDECX_LIVE_VERIFIED',
-          };
-        }
-      }
-    }
-  } catch {
-    // Fallback silently to cached annual invitations without exposing credentials
-  }
-
-  const cachedWithOverlays = indecxSession.cachedActiveInvitations.map(applyNpsExtendedOverlay);
-  indecxSession.cachedActiveInvitations = cachedWithOverlays;
-
-  return {
-    invitations: cachedWithOverlays,
-    currentYear,
-    source: 'LOCAL_CACHE_SYNC',
-  };
+  inFlightIndecxSyncPromise = runNpsSync().finally(() => {
+    inFlightIndecxSyncPromise = null;
+  });
+  return inFlightIndecxSyncPromise;
 }
 
 function formatBrasiliaSyncTimestamp(date: Date): {
@@ -1716,14 +1871,43 @@ async function startServer() {
     next();
   }
 
+  // Health check endpoint for monitoring and stress testing
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      status: 'healthy',
+      schoolId: currentActiveSchoolId,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   // API endpoint for 1-minute automatic synchronization with Portal do Aluno Microlins + Indecx NPS Anual
   app.get('/api/microlins/sync', async (req, res) => {
     const syncTime = formatBrasiliaSyncTimestamp(new Date());
     const semanaQuery = typeof req.query.semana === 'string' ? req.query.semana : undefined;
+    const forceLive = req.query.forceLive === '1' || req.query.force === '1';
+
+    if (forceLive) {
+      lastLiveSyncTime = 0;
+      indecxSession.lastFetchedAt = 0;
+      for (const [, entry] of portalSession.cachedBySemana) {
+        entry.fetchedAt = 0;
+      }
+    }
 
     try {
-      const portalResult = await syncLivePortalRecords(semanaQuery);
-      const npsResult = await syncActiveIndecxNpsInvitations(portalResult.allWeekRecords);
+      let portalResult: Awaited<ReturnType<typeof syncLivePortalRecords>>;
+      let npsResult: Awaited<ReturnType<typeof syncActiveIndecxNpsInvitations>>;
+
+      if (portalSession.cachedAllWeekRecords.length > 0) {
+        [portalResult, npsResult] = await Promise.all([
+          syncLivePortalRecords(semanaQuery),
+          syncActiveIndecxNpsInvitations(portalSession.cachedAllWeekRecords),
+        ]);
+      } else {
+        portalResult = await syncLivePortalRecords(semanaQuery);
+        npsResult = await syncActiveIndecxNpsInvitations(portalResult.allWeekRecords);
+      }
 
       res.json({
         ok: true,
@@ -1766,8 +1950,11 @@ async function startServer() {
   });
 
   // Dedicated endpoint for annual NPS invitations (sanitized, no credentials or tokens ever exposed)
-  app.get('/api/nps/active', async (_req, res) => {
+  app.get('/api/nps/active', async (req, res) => {
     const syncTime = formatBrasiliaSyncTimestamp(new Date());
+    if (req.query.forceLive === '1' || req.query.force === '1') {
+      indecxSession.lastFetchedAt = 0;
+    }
     const npsResult = await syncActiveIndecxNpsInvitations(
       portalSession.cachedAllWeekRecords
     );
@@ -2916,7 +3103,7 @@ async function startServer() {
   app.get('/api/auth/session', (req, res) => {
     const session = resolveAuthenticatedSession(req);
     if (!session) {
-      res.status(401).json({ ok: false, authenticated: false });
+      res.status(200).json({ ok: false, authenticated: false, session: null });
       return;
     }
     res.json({

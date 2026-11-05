@@ -37,10 +37,8 @@ import {
 } from '../data/microlinsData';
 import {
   EvaluatedStudentRecord,
-  evaluatePortalNpsPriorityOnLogin,
   normalizePersonName,
 } from '../utils/performanceAnalytics';
-import { NpsPortalEvaluationModal } from './NpsPortalEvaluationModal';
 import {
   BoletimModuleRecord,
   buildStudentFichaIndividual,
@@ -121,12 +119,6 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
     () => buildUniqueStudentDirectory(allStudents, unidadeAtual),
     [allStudents, unidadeAtual]
   );
-
-  // Controle de modal NPS prioritário no Portal do Aluno (Seção 1.3)
-  const [activePortalNpsModalInvite, setActivePortalNpsModalInvite] =
-    useState<ActiveNpsInvitation | null>(null);
-  const [dismissedPortalInviteIdsInSession, setDismissedPortalInviteIdsInSession] =
-    useState<Set<string>>(() => new Set());
 
   // Estado da pesquisa de alunos (por contrato ou nome completo/parcial)
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -226,24 +218,6 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
       .catch(() => setQrCodeDataUrl(''));
   }, [selectedStudentItem]);
 
-  // Avaliação automática das 5 condições de Priorização NPS no Login do Portal do Aluno (Seção 1.3)
-  const studentPendingNpsInvite = useMemo<ActiveNpsInvitation | null>(() => {
-    if (!selectedStudentItem) return null;
-    const normStudent = normalizePersonName(selectedStudentItem.nomeCompleto);
-    return (
-      activeNpsInvitations.find((inv) => {
-        if (inv.answered || inv.invitationStatus === 'respondido') return false;
-        const matchContrato =
-          Boolean(selectedStudentItem.contrato) &&
-          inv.contrato === selectedStudentItem.contrato;
-        const matchName =
-          Boolean(normStudent) &&
-          normalizePersonName(inv.studentName) === normStudent;
-        return matchContrato || matchName;
-      }) || null
-    );
-  }, [selectedStudentItem, activeNpsInvitations]);
-
   const studentAnsweredNpsInvite = useMemo<ActiveNpsInvitation | null>(() => {
     if (!selectedStudentItem) return null;
     const normStudent = normalizePersonName(selectedStudentItem.nomeCompleto);
@@ -260,40 +234,6 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
       }) || null
     );
   }, [selectedStudentItem, activeNpsInvitations]);
-
-  useEffect(() => {
-    if (!selectedStudentItem) {
-      setActivePortalNpsModalInvite(null);
-      return;
-    }
-    const check = evaluatePortalNpsPriorityOnLogin({
-      contrato: selectedStudentItem.contrato,
-      studentName: selectedStudentItem.nomeCompleto,
-      invitations: activeNpsInvitations,
-      hasAnotherPriorityModalOpenInSession: Boolean(activePortalNpsModalInvite),
-    });
-    if (
-      check.shouldShowModal &&
-      check.invitation &&
-      !dismissedPortalInviteIdsInSession.has(check.invitation.id)
-    ) {
-      setActivePortalNpsModalInvite(check.invitation);
-    }
-  }, [
-    selectedStudentItem,
-    activeNpsInvitations,
-    activePortalNpsModalInvite,
-    dismissedPortalInviteIdsInSession,
-  ]);
-
-  const prioritizedPortalInvitesList = useMemo(() => {
-    return activeNpsInvitations.filter(
-      (inv) =>
-        Boolean(inv.priorizarNpsNoLogin) &&
-        !inv.answered &&
-        inv.invitationStatus !== 'respondido'
-    );
-  }, [activeNpsInvitations]);
 
   const handleSelectStudentFromSearch = (item: StudentSearchDirectoryItem) => {
     setSelectedContrato(item.contrato);
@@ -329,7 +269,7 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
     window.print();
   };
 
-  // Geração de PDF Oficial da Carteirinha Estudantil (Frente e Verso)
+  // Geração de PDF Oficial da Carteirinha Estudantil (Padrão ID-1: 85.60mm x 53.98mm)
   const handleDownloadCarteirinhaPdf = () => {
     if (!fichaAcademica) return;
     const { student } = fichaAcademica;
@@ -345,132 +285,129 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(13);
-    doc.text('MICROLINS — DOCUMENTO OFICIAL DE IDENTIFICAÇÃO ESTUDANTIL', 14, 11);
+    doc.text('MICROLINS — CARTEIRA DE IDENTIFICAÇÃO ESTUDANTIL (PADRÃO ID-1)', 14, 11);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9);
     doc.text(
-      `Unidade: ${student.unidadeEnsino} · Contrato #${student.contrato} · Emitido em ${PORTAL_METADATA.dataReferencia}`,
+      `Unidade: ${student.unidadeEnsino} · Matrícula #${student.contrato} · Proporção Oficial 85,60 × 53,98 mm`,
       14,
       18
     );
 
-    // FRENTE DA CARTEIRINHA (86mm x 54mm)
-    const cardX = 18;
+    // FRENTE DA CARTEIRINHA (Padrão ID-1 exato: 85.60mm x 53.98mm)
+    const cardX = 16;
     const frontY = 36;
-    const cardW = 86;
-    const cardH = 54;
+    const cardW = 85.6;
+    const cardH = 53.98;
 
-    doc.setDrawColor(0, 59, 112);
-    doc.setLineWidth(0.5);
+    doc.setDrawColor(0, 74, 141);
+    doc.setLineWidth(0.4);
     doc.roundedRect(cardX, frontY, cardW, cardH, 3, 3, 'S');
     doc.setFillColor(0, 74, 141);
-    doc.roundedRect(cardX, frontY, cardW, 12, 3, 3, 'F');
-    doc.rect(cardX, frontY + 9, cardW, 3, 'F');
+    doc.roundedRect(cardX, frontY, cardW, 11.5, 3, 3, 'F');
+    doc.rect(cardX, frontY + 8.5, cardW, 3, 'F');
 
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.text('MICROLINS', cardX + 4, frontY + 6.5);
-    doc.setFontSize(6.5);
-    doc.text('CARTEIRINHA ESTUDANTIL OFICIAL', cardX + 4, frontY + 10.2);
-    doc.text(`#${student.contrato}`, cardX + cardW - 4, frontY + 7.5, {
+    doc.setFontSize(9.5);
+    doc.text('MICROLINS', cardX + 4, frontY + 6.2);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(6);
+    doc.text('CARTEIRA ESTUDANTIL OFICIAL', cardX + 4, frontY + 9.8);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.text(`#${student.contrato}`, cardX + cardW - 4, frontY + 7.2, {
       align: 'right',
     });
 
-    // Quadro da Foto 3x4
-    doc.setFillColor(241, 245, 249);
+    // Quadro da Foto 3x4 Minimalista
+    doc.setFillColor(248, 250, 252);
     doc.setDrawColor(203, 213, 225);
-    doc.roundedRect(cardX + 4, frontY + 15, 20, 26, 1.5, 1.5, 'FD');
-    doc.setTextColor(71, 85, 105);
-    doc.setFontSize(7);
-    doc.text('FOTO', cardX + 14, frontY + 28, { align: 'center' });
+    doc.roundedRect(cardX + 4, frontY + 14.5, 19, 25, 1.5, 1.5, 'FD');
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(6.5);
+    doc.text('FOTO 3x4', cardX + 13.5, frontY + 27.5, { align: 'center' });
 
-    // Dados da Frente
+    // Dados Essenciais da Frente
     doc.setTextColor(15, 23, 42);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(8);
-    doc.text(student.nomeCompleto.slice(0, 34), cardX + 27, frontY + 18.5);
+    doc.text(student.nomeCompleto.slice(0, 34), cardX + 26, frontY + 18);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6.5);
+    doc.setFontSize(6.3);
     doc.setTextColor(71, 85, 105);
-    doc.text(`Curso: ${student.cursoMatriculado.slice(0, 34)}`, cardX + 27, frontY + 23.5);
+    doc.text(`Curso: ${student.cursoMatriculado.slice(0, 35)}`, cardX + 26, frontY + 23);
     doc.text(
-      `Contrato/Matrícula: #${student.contrato} · Situação: ${student.situacaoMatricula}`,
-      cardX + 27,
-      frontY + 28
+      `Matrícula: #${student.contrato} · ${student.situacaoMatricula}`,
+      cardX + 26,
+      frontY + 27.5
     );
+    doc.text(`Unidade: ${student.unidadeEnsino.slice(0, 34)}`, cardX + 26, frontY + 32);
     doc.text(
-      `Data Nasc.: ${customBirthDate.trim() || 'Conforme cadastro'} · Matrícula: ${student.dataMatricula}`,
-      cardX + 27,
-      frontY + 32.5
+      `Nasc.: ${customBirthDate.trim() || 'Conforme cadastro'} · Início: ${student.dataMatricula}`,
+      cardX + 26,
+      frontY + 36.5
     );
-    doc.text(
-      `CPF: ${customAuthorizedCpf.trim() || 'Protegido (LGPD)'}`,
-      cardX + 27,
-      frontY + 37
-    );
-    doc.text(`Unidade: ${student.unidadeEnsino}`, cardX + 27, frontY + 41.5);
 
     doc.setFillColor(241, 245, 249);
-    doc.rect(cardX + 0.5, frontY + 45, cardW - 1, 8.5, 'F');
+    doc.rect(cardX + 0.4, frontY + 45.2, cardW - 0.8, 8.3, 'F');
     doc.setTextColor(0, 74, 141);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6.5);
-    doc.text(
-      `IDENTIFICAÇÃO INSTITUCIONAL ATIVA · VALIDADE: ${cardValidThru}`,
-      cardX + 4,
-      frontY + 50.5
-    );
+    doc.setFontSize(6.3);
+    doc.text('IDENTIFICAÇÃO ESTUDANTIL ATIVA', cardX + 4, frontY + 50.5);
+    doc.text(`VALIDADE: ${cardValidThru}`, cardX + cardW - 4, frontY + 50.5, {
+      align: 'right',
+    });
 
-    // VERSO DA CARTEIRINHA (86mm x 54mm ao lado)
+    // VERSO DA CARTEIRINHA (Padrão ID-1 exato: 85.60mm x 53.98mm)
     const backX = 108;
     const backY = 36;
-    doc.setDrawColor(0, 59, 112);
-    doc.setLineWidth(0.5);
+    doc.setDrawColor(0, 40, 85);
+    doc.setLineWidth(0.4);
     doc.roundedRect(backX, backY, cardW, cardH, 3, 3, 'S');
     doc.setFillColor(0, 40, 85);
-    doc.rect(backX, backY + 4, cardW, 7, 'F');
+    doc.roundedRect(backX, backY, cardW, 10, 3, 3, 'F');
+    doc.rect(backX, backY + 7, cardW, 3, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7);
+    doc.setFontSize(6.8);
     doc.text(
-      'IDENTIFICAÇÃO INSTITUCIONAL — VERSO DE VALIDAÇÃO',
+      'VALIDAÇÃO ACADÊMICA E REGISTRO INSTITUCIONAL',
       backX + 4,
-      backY + 8.5
+      backY + 6.5
     );
 
     doc.setTextColor(30, 41, 59);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6.5);
+    doc.setFontSize(6.2);
     doc.text(
       [
-        '1. Esta carteirinha comprova o vínculo acadêmico ativo do aluno',
-        `   matriculado na unidade ${student.unidadeEnsino}.`,
-        '2. Documento pessoal e intransferível, válido mediante apresentação',
-        '   de documento oficial com foto quando solicitado.',
-        `3. Matrícula registrada em ${student.dataMatricula} sob o Contrato #${student.contrato}.`,
-        `4. Modalidade: ${student.modalidade} · Turno: ${student.turno}.`,
+        '1. Esta carteira comprova o vínculo acadêmico ativo do(a) estudante',
+        `   na unidade ${student.unidadeEnsino}.`,
+        '2. Uso pessoal e intransferível, válido mediante apresentação de',
+        '   documento oficial com foto quando solicitado.',
+        `3. Matrícula #${student.contrato} · Turno: ${student.turno}.`,
       ],
       backX + 4,
-      backY + 16
+      backY + 15.5
     );
 
     if (qrCodeDataUrl) {
       try {
-        doc.addImage(qrCodeDataUrl, 'PNG', backX + cardW - 24, backY + 26, 20, 20);
+        doc.addImage(qrCodeDataUrl, 'PNG', backX + cardW - 23, backY + 24.5, 19, 19);
       } catch {
         // Ignore QR embed failure
       }
     }
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6.5);
+    doc.setFontSize(6.2);
     doc.setTextColor(0, 74, 141);
     doc.text(
-      `CÓDIGO DE REGISTRO: MIC-${student.codigoUnidade}-${student.contrato}`,
+      `REGISTRO: MIC-${student.codigoUnidade}-${student.contrato}`,
       backX + 4,
-      backY + 48
+      backY + 49
     );
 
     doc.save(`Carteirinha_Microlins_${student.contrato}_${student.nomeCompleto.replace(/\s+/g, '_')}.pdf`);
@@ -669,25 +606,26 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
     doc.setTextColor(0, 40, 85);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(16);
-    doc.text('DECLARAÇÃO OFICIAL DE MATRÍCULA E FREQUÊNCIA', 105, 52, {
+    doc.text('DECLARAÇÃO DE MATRÍCULA', 105, 52, {
       align: 'center',
     });
 
     doc.setDrawColor(0, 74, 141);
     doc.setLineWidth(0.6);
-    doc.line(35, 56, 175, 56);
+    doc.line(55, 56, 155, 56);
 
     // Corpo formal da declaração
     doc.setTextColor(15, 23, 42);
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(11);
 
+    const currentYear = new Date().getFullYear();
     const cpfText = customAuthorizedCpf.trim()
       ? `, inscrito(a) no CPF sob o nº ${customAuthorizedCpf.trim()}`
       : '';
-    const bodyParagraph1 = `Declaramos, para os devidos fins de comprovação escolar, acompanhamento pedagógico e demais finalidades legítimas, que o(a) aluno(a) ${student.nomeCompleto}${cpfText}, encontra-se regularmente matriculado(a) nesta instituição de ensino sob o Contrato / Matrícula nº #${student.contrato}.`;
+    const bodyParagraph1 = `Declaramos, para os devidos fins de comprovação escolar, acompanhamento pedagógico e demais finalidades legítimas, que o(a) aluno(a) ${student.nomeCompleto}${cpfText}, encontra-se regularmente matriculado(a) nesta instituição de ensino sob a Matrícula / Contrato nº #${student.contrato}, no ano letivo de ${currentYear}.`;
 
-    const bodyParagraph2 = `O(A) referido(a) discente cursa a formação "${student.cursoMatriculado}", com início registrado em ${student.dataMatricula}, na modalidade ${student.modalidade}, encontrando-se atualmente com situação cadastral "${student.situacaoMatricula}", cursando o módulo "${student.moduloAtual}" nos horários institucionais (${student.diasHorariosResumo}) e apresentando frequência geral consolidada de ${formatNumericBR(indicadoresConsolidados.frequenciaGeralConsolidada)}%.`;
+    const bodyParagraph2 = `O(A) referido(a) discente cursa a formação "${student.cursoMatriculado}", com início registrado em ${student.dataMatricula}, na modalidade ${student.modalidade} (Turno: ${student.turno}), encontrando-se atualmente com situação cadastral "${student.situacaoMatricula}", cursando o módulo "${student.moduloAtual}" nos horários institucionais (${student.diasHorariosResumo}) e apresentando frequência geral consolidada de ${formatNumericBR(indicadoresConsolidados.frequenciaGeralConsolidada)}%.`;
 
     const bodyParagraph3 = `Por ser expressão da verdade e estar em conformidade com os registros acadêmicos oficiais da unidade (${schoolInfo.nomeUnidade}), firmamos a presente declaração para que produza seus efeitos legais e institucionais.`;
 
@@ -714,16 +652,16 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
     doc.setFontSize(9);
     doc.setTextColor(30, 41, 59);
     doc.text(`• Nome Completo do Aluno: ${student.nomeCompleto}`, 26, 171);
-    doc.text(`• Número do Contrato / Matrícula: #${student.contrato}`, 26, 177);
-    doc.text(`• Curso Matriculado: ${student.cursoMatriculado}`, 26, 183);
-    doc.text(`• Módulo em Andamento: ${student.moduloAtual}`, 26, 189);
+    doc.text(`• Matrícula / Código do Aluno: #${student.contrato}`, 26, 177);
+    doc.text(`• Curso / Turma: ${student.cursoMatriculado} (${student.moduloAtual})`, 26, 183);
+    doc.text(`• Turno / Horário: ${student.turno} (${student.diasHorariosResumo})`, 26, 189);
     doc.text(
-      `• Data de Início / Matrícula: ${student.dataMatricula} · Situação: ${student.situacaoMatricula}`,
+      `• Ano Letivo: ${currentYear} · Início: ${student.dataMatricula} · Situação: ${student.situacaoMatricula}`,
       26,
       195
     );
     doc.text(
-      `• Unidade de Ensino: ${schoolInfo.nomeUnidade} (${schoolInfo.cidadeUf})`,
+      `• Unidade de Ensino: ${schoolInfo.nomeUnidade}`,
       26,
       201
     );
@@ -736,7 +674,7 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
       align: 'center',
     });
 
-    // Campo legítimo para assinatura física (sem simular assinatura falsa)
+    // Campo legítimo para assinatura física
     doc.setDrawColor(71, 85, 105);
     doc.setLineWidth(0.4);
     doc.line(55, 252, 155, 252);
@@ -748,23 +686,19 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
     doc.setTextColor(71, 85, 105);
     doc.text(schoolInfo.responsavelAssinaturaCargo, 105, 263, { align: 'center' });
     doc.text(
-      '(Espaço reservado para assinatura física e carimbo oficial da unidade)',
+      '(Espaço reservado para assinatura e validação institucional)',
       105,
       268,
       { align: 'center' }
     );
 
-    // Rodapé Institucional
+    // Rodapé Institucional — SOMENTE o nome da escola conforme Seção 13
     doc.setFillColor(0, 40, 85);
     doc.rect(0, 282, 210, 15, 'F');
     doc.setTextColor(255, 255, 255);
-    doc.setFontSize(7.5);
-    doc.text(
-      `${schoolInfo.nomeUnidade} · Endereço: ${schoolInfo.enderecoCompleto} · Contato: ${schoolInfo.telefoneSecretaria}`,
-      105,
-      290,
-      { align: 'center' }
-    );
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.5);
+    doc.text(schoolInfo.nomeUnidade, 105, 291, { align: 'center' });
 
     doc.save(
       `Declaracao_Matricula_${student.contrato}_${student.nomeCompleto.replace(/\s+/g, '_')}.pdf`
@@ -944,47 +878,6 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
               </div>
             )}
 
-            {/* Lista rápida de alunos com Pesquisa NPS Priorizada no Portal do Aluno (Seção 1.3) */}
-            {prioritizedPortalInvitesList.length > 0 && (
-              <div
-                data-testid="ficha-prioritized-nps-banner"
-                className="mx-auto mt-6 max-w-3xl rounded-xl border border-amber-300 bg-amber-50/80 p-4"
-              >
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <span className="text-xs font-black uppercase tracking-wider text-amber-900">
-                    Pesquisas NPS Priorizadas para o Próximo Login ({prioritizedPortalInvitesList.length})
-                  </span>
-                  <span className="text-[11px] font-semibold text-amber-800">
-                    Clique para simular o acesso do aluno ao Portal
-                  </span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {prioritizedPortalInvitesList.map((inv) => {
-                    const matchedDir = studentDirectory.find(
-                      (d) =>
-                        (inv.contrato && d.contrato === inv.contrato) ||
-                        normalizePersonName(d.nomeCompleto) ===
-                          normalizePersonName(inv.studentName)
-                    );
-                    if (!matchedDir) return null;
-                    return (
-                      <button
-                        key={inv.id}
-                        type="button"
-                        data-testid={`ficha-prioritized-student-btn-${matchedDir.contrato}`}
-                        onClick={() => handleSelectStudentFromSearch(matchedDir)}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400 bg-white px-3 py-1.5 text-xs font-bold text-amber-950 hover:bg-amber-500 hover:text-white transition-colors cursor-pointer"
-                      >
-                        <span>
-                          #{matchedDir.contrato} · {matchedDir.nomeCompleto} (
-                          {inv.cicloPriorizado || inv.pontoJornada})
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
           </div>
         </section>
       ) : (
@@ -1043,28 +936,7 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
               </div>
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {studentPendingNpsInvite && (
-                  <button
-                    type="button"
-                    data-testid="ficha-open-nps-portal-modal-btn"
-                    onClick={() =>
-                      setActivePortalNpsModalInvite(studentPendingNpsInvite)
-                    }
-                    className={`inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-xs font-bold transition-colors cursor-pointer whitespace-nowrap ${
-                      studentPendingNpsInvite.priorizarNpsNoLogin
-                        ? 'border-amber-500 bg-amber-500 text-white hover:bg-amber-600'
-                        : 'border-indigo-300 bg-indigo-50 text-indigo-900 hover:bg-indigo-600 hover:text-white'
-                    }`}
-                  >
-                    <span>
-                      {studentPendingNpsInvite.priorizarNpsNoLogin
-                        ? `Responder NPS Prioritário (${studentPendingNpsInvite.pontoJornada})`
-                        : `Avaliar Experiência NPS (${studentPendingNpsInvite.pontoJornada})`}
-                    </span>
-                  </button>
-                )}
-
-                {!studentPendingNpsInvite && studentAnsweredNpsInvite && (
+                {studentAnsweredNpsInvite && (
                   <span
                     data-testid="ficha-nps-answered-badge"
                     className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-emerald-300 bg-emerald-50 px-3 text-xs font-bold text-emerald-800 whitespace-nowrap"
@@ -1321,41 +1193,43 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                 </div>
               </div>
 
-              {/* Exibição Lado a Lado: FRENTE e VERSO da Carteirinha Estudantil */}
-              <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-                {/* FRENTE DA CARTEIRINHA */}
+              {/* Exibição Lado a Lado: FRENTE e VERSO da Carteirinha Estudantil (Proporção Padrão ID-1: 85.60 × 53.98 mm) */}
+              <div className="grid grid-cols-1 place-items-center gap-6 lg:grid-cols-2">
+                {/* FRENTE DA CARTEIRINHA (ID-1: 85.60 x 53.98 mm -> aspect-[85.6/53.98]) */}
                 <div
                   data-testid="student-id-card-front"
-                  className="flex flex-col justify-between overflow-hidden rounded-2xl border-2 border-[#004A8D] bg-white shadow-md dark:bg-slate-900"
+                  data-card-standard="ID-1-85.60x53.98mm"
+                  className="flex aspect-[85.6/53.98] w-full max-w-[460px] flex-col justify-between overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-md ring-1 ring-[#004A8D]/15 dark:border-slate-700 dark:bg-slate-900"
                 >
-                  {/* Topo Institucional com Logotipo Oficial Microlins */}
-                  <div className="flex items-center justify-between bg-[#004A8D] px-5 py-3.5 text-white">
+                  {/* Topo Minimalista Institucional Microlins */}
+                  <div className="flex items-center justify-between bg-gradient-to-r from-[#004A8D] to-[#00386B] px-4 py-2.5 text-white">
                     <div className="flex items-center gap-2.5">
                       <img
                         src="/assets/aistudio/logo-microlins_6400203f.png"
                         alt="Microlins"
-                        className="h-6 w-auto object-contain brightness-0 invert"
+                        className="h-5 w-auto object-contain brightness-0 invert"
                       />
+                      <div className="h-3.5 w-px bg-white/25" />
                       <div>
-                        <div className="text-xs font-black tracking-wide uppercase">
-                          CARTEIRINHA ESTUDANTIL OFICIAL
+                        <div className="text-[11px] font-extrabold tracking-wider uppercase leading-tight">
+                          Carteira Estudantil
                         </div>
-                        <div className="text-[10px] text-sky-200">
-                          Identificação Institucional de Aluno Matriculado
+                        <div className="text-[9px] font-medium text-sky-200 leading-tight">
+                          Identificação Oficial · Padrão ID-1
                         </div>
                       </div>
                     </div>
 
-                    <div className="text-right font-mono text-xs font-black text-amber-300 tabular-nums">
+                    <span className="rounded-md bg-white/15 px-2 py-0.5 font-mono text-[11px] font-black text-amber-300 tabular-nums">
                       #{fichaAcademica.student.contrato}
-                    </div>
+                    </span>
                   </div>
 
-                  {/* Corpo Principal da Frente */}
-                  <div className="flex flex-col gap-4 p-5 sm:flex-row">
-                    {/* Fotografia 3x4 do Aluno */}
-                    <div className="flex flex-col items-center">
-                      <div className="flex h-32 w-24 shrink-0 flex-col items-center justify-center overflow-hidden rounded-xl border-2 border-slate-200 bg-slate-100 text-slate-500 dark:border-slate-700 dark:bg-slate-800">
+                  {/* Corpo Principal Minimalista da Frente */}
+                  <div className="flex flex-1 items-center gap-3.5 px-4 py-2.5">
+                    {/* Foto ou Avatar Padrão 3x4 */}
+                    <div className="flex shrink-0 flex-col items-center">
+                      <div className="flex h-24 w-[72px] flex-col items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-slate-500 shadow-2xs dark:border-slate-700 dark:bg-slate-800">
                         {customStudentPhotoUrl ? (
                           <img
                             src={customStudentPhotoUrl}
@@ -1363,159 +1237,160 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                             className="h-full w-full object-cover"
                           />
                         ) : (
-                          <div className="flex flex-col items-center justify-center p-2 text-center">
-                            <User className="h-10 w-10 text-[#004A8D] dark:text-sky-400" />
-                            <span className="mt-1 text-[10px] font-bold text-slate-500 dark:text-slate-400">
-                              FOTO 3x4
+                          <div className="flex flex-col items-center justify-center p-1.5 text-center">
+                            <User className="h-8 w-8 text-[#004A8D] dark:text-sky-400" />
+                            <span className="mt-1 text-[8px] font-bold tracking-wider text-slate-400 uppercase">
+                              Foto 3x4
                             </span>
                           </div>
                         )}
                       </div>
-                      <span className="mt-1.5 font-mono text-[10px] font-bold text-emerald-700 dark:text-emerald-400">
+                      <span className="mt-1 inline-flex items-center gap-1 text-[9px] font-extrabold text-emerald-700 uppercase dark:text-emerald-400">
+                        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
                         {fichaAcademica.student.situacaoMatricula}
                       </span>
                     </div>
 
-                    {/* Campos Obrigatórios da Frente */}
-                    <div className="min-w-0 flex-1 space-y-2.5 text-xs">
+                    {/* Dados Essenciais do Estudante */}
+                    <div className="min-w-0 flex-1 space-y-1.5 text-xs">
                       <div>
-                        <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                          Nome Completo do Aluno
+                        <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">
+                          Nome do Aluno
                         </span>
-                        <p className="text-sm font-black text-slate-900 dark:text-white">
+                        <p
+                          data-testid="carteirinha-student-name"
+                          className="truncate text-sm font-black text-slate-900 leading-snug dark:text-white"
+                          title={fichaAcademica.student.nomeCompleto}
+                        >
                           {fichaAcademica.student.nomeCompleto}
                         </p>
                       </div>
 
                       <div>
-                        <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                          Curso Matriculado
+                        <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">
+                          Curso / Formação
                         </span>
-                        <p className="font-bold text-[#004A8D] dark:text-sky-400">
+                        <p
+                          data-testid="carteirinha-student-course"
+                          className="truncate text-xs font-bold text-[#004A8D] leading-snug dark:text-sky-400"
+                          title={fichaAcademica.student.cursoMatriculado}
+                        >
                           {fichaAcademica.student.cursoMatriculado}
                         </p>
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-2 gap-2 pt-0.5">
                         <div>
-                          <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                            Contrato / Matrícula
+                          <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">
+                            Matrícula / Contrato
                           </span>
-                          <p className="font-mono font-bold text-slate-900 tabular-nums dark:text-white">
+                          <p
+                            data-testid="carteirinha-student-matricula"
+                            className="font-mono text-[11px] font-bold text-slate-900 tabular-nums dark:text-white"
+                          >
                             #{fichaAcademica.student.contrato}
                           </p>
                         </div>
 
                         <div>
-                          <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                            Data de Matrícula
+                          <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">
+                            Validade
                           </span>
-                          <p className="font-semibold text-slate-800 tabular-nums dark:text-slate-200">
-                            {fichaAcademica.student.dataMatricula}
-                          </p>
-                        </div>
-
-                        <div>
-                          <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                            Data de Nascimento
-                          </span>
-                          <p className="font-semibold text-slate-800 tabular-nums dark:text-slate-200">
-                            {customBirthDate.trim() || 'Conforme cadastro'}
-                          </p>
-                        </div>
-
-                        <div>
-                          <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                            CPF (Quando Autorizado)
-                          </span>
-                          <p className="font-mono font-semibold text-slate-800 tabular-nums dark:text-slate-200">
-                            {customAuthorizedCpf.trim() || 'Protegido (LGPD)'}
+                          <p
+                            data-testid="carteirinha-student-validade"
+                            className="font-mono text-[11px] font-bold text-slate-900 tabular-nums dark:text-white"
+                          >
+                            {cardValidThru}
                           </p>
                         </div>
                       </div>
 
                       <div>
-                        <span className="block text-[10px] font-bold text-slate-400 uppercase">
-                          Unidade de Ensino
+                        <span className="block text-[9px] font-bold tracking-wider text-slate-400 uppercase">
+                          Instituição / Unidade
                         </span>
-                        <p className="font-bold text-slate-800 dark:text-slate-200">
-                          {fichaAcademica.student.unidadeEnsino} (Cód. #
-                          {fichaAcademica.student.codigoUnidade})
+                        <p
+                          data-testid="carteirinha-student-institution"
+                          className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-300"
+                          title={`${fichaAcademica.student.unidadeEnsino} (#${fichaAcademica.student.codigoUnidade})`}
+                        >
+                          Microlins · {fichaAcademica.student.unidadeEnsino}
                         </p>
                       </div>
                     </div>
                   </div>
 
-                  {/* Rodapé da Frente */}
-                  <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-2.5 text-[11px] font-bold text-slate-700 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-300">
-                    <span>FRENTE · IDENTIFICAÇÃO ESTUDANTIL</span>
-                    <span className="font-mono tabular-nums">
-                      VÁLIDA ATÉ: {cardValidThru}
+                  {/* Rodapé Minimalista da Frente */}
+                  <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50/90 px-4 py-1.5 text-[10px] font-bold text-slate-600 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-300">
+                    <span>MICROLINS EDUCAÇÃO PROFISSIONAL</span>
+                    <span className="font-mono tabular-nums text-[#004A8D] dark:text-sky-400">
+                      VÁLIDA ATÉ {cardValidThru}
                     </span>
                   </div>
                 </div>
 
-                {/* VERSO DA CARTEIRINHA */}
+                {/* VERSO DA CARTEIRINHA (ID-1: 85.60 x 53.98 mm -> aspect-[85.6/53.98]) */}
                 <div
                   data-testid="student-id-card-back"
-                  className="flex flex-col justify-between overflow-hidden rounded-2xl border-2 border-[#002855] bg-white shadow-md dark:bg-slate-900"
+                  data-card-standard="ID-1-85.60x53.98mm"
+                  className="flex aspect-[85.6/53.98] w-full max-w-[460px] flex-col justify-between overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-md ring-1 ring-[#002855]/15 dark:border-slate-700 dark:bg-slate-900"
                 >
-                  <div className="flex items-center justify-between bg-[#002855] px-5 py-3.5 text-white">
+                  <div className="flex items-center justify-between bg-[#002855] px-4 py-2.5 text-white">
                     <div>
-                      <div className="text-xs font-black tracking-wide uppercase">
-                        IDENTIFICAÇÃO INSTITUCIONAL — VERSO
+                      <div className="text-[11px] font-extrabold tracking-wider uppercase leading-tight">
+                        Validação Acadêmica Institucional
                       </div>
-                      <div className="text-[10px] text-sky-200">
-                        Validação Acadêmica e Registro de Matrícula Ativa
+                      <div className="text-[9px] text-sky-200 leading-tight">
+                        Registro Oficial de Matrícula Ativa
                       </div>
                     </div>
-                    <ShieldCheck className="h-5 w-5 text-emerald-400" />
+                    <ShieldCheck className="h-4 w-4 text-emerald-400" />
                   </div>
 
-                  <div className="flex flex-col justify-between gap-4 p-5 sm:flex-row sm:items-center">
-                    <div className="flex-1 space-y-2 text-xs leading-relaxed text-slate-600 dark:text-slate-300">
-                      <p className="font-bold text-slate-900 dark:text-white">
-                        Normas de Identificação Estudantil:
+                  <div className="flex flex-1 items-center justify-between gap-3.5 px-4 py-2.5">
+                    <div className="flex-1 space-y-1.5 text-[11px] leading-snug text-slate-600 dark:text-slate-300">
+                      <p>
+                        1. Comprova o vínculo acadêmico ativo de{' '}
+                        <strong className="text-slate-900 dark:text-white">
+                          {fichaAcademica.student.nomeCompleto}
+                        </strong>{' '}
+                        na unidade{' '}
+                        <strong className="text-slate-900 dark:text-white">
+                          {fichaAcademica.student.unidadeEnsino}
+                        </strong>
+                        .
                       </p>
                       <p>
-                        1. Este documento comprova o vínculo acadêmico ativo do(a)
-                        aluno(a){' '}
-                        <strong>{fichaAcademica.student.nomeCompleto}</strong> junto
-                        à unidade{' '}
-                        <strong>{fichaAcademica.student.unidadeEnsino}</strong>.
+                        2. Uso pessoal e intransferível, mediante apresentação
+                        de documento oficial com foto.
                       </p>
-                      <p>
-                        2. O uso desta identificação é pessoal e intransferível,
-                        devendo ser apresentada acompanhada de documento oficial
-                        com foto quando solicitado.
-                      </p>
-                      <p className="font-mono text-[11px] font-bold text-[#004A8D] tabular-nums dark:text-sky-400">
-                        REGISTRO OFICIAL: MIC-{fichaAcademica.student.codigoUnidade}
-                        -{fichaAcademica.student.contrato}
-                      </p>
+                      <div className="pt-1 font-mono text-[10px] font-bold text-[#004A8D] tabular-nums dark:text-sky-400">
+                        CÓD. VALIDAÇÃO: MIC-{fichaAcademica.student.codigoUnidade}-
+                        {fichaAcademica.student.contrato}
+                      </div>
                     </div>
 
                     {/* QR Code de Validação */}
-                    <div className="flex shrink-0 flex-col items-center justify-center rounded-xl border border-slate-200 bg-white p-3 text-center">
+                    <div className="flex shrink-0 flex-col items-center justify-center rounded-xl border border-slate-200 bg-white p-2 text-center shadow-2xs">
                       {qrCodeDataUrl ? (
                         <img
                           src={qrCodeDataUrl}
                           alt="QR Code de validação da matrícula"
-                          className="h-24 w-24 object-contain"
+                          className="h-20 w-20 object-contain"
                         />
                       ) : (
-                        <div className="flex h-24 w-24 items-center justify-center text-[10px] text-slate-400">
+                        <div className="flex h-20 w-20 items-center justify-center text-[9px] text-slate-400">
                           QR Code
                         </div>
                       )}
-                      <span className="mt-1 font-mono text-[9px] font-bold text-slate-700">
-                        VALIDAÇÃO PORTAL
+                      <span className="mt-0.5 font-mono text-[8px] font-bold text-slate-600">
+                        VALIDAR MATRÍCULA
                       </span>
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-2.5 text-[11px] font-bold text-slate-700 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-300">
-                    <span>VERSO · GRUPO REALIZAR MICROLINS</span>
+                  <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50/90 px-4 py-1.5 text-[10px] font-bold text-slate-600 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-300">
+                    <span>UNIDADE #{fichaAcademica.student.codigoUnidade}</span>
                     <span className="font-mono tabular-nums">
                       CONTRATO #{fichaAcademica.student.contrato}
                     </span>
@@ -2251,8 +2126,11 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                 {/* Corpo da Declaração Escolar Oficial */}
                 <div className="space-y-6 px-8 py-10 sm:px-12">
                   <div className="text-center">
-                    <h3 className="text-xl font-black tracking-wide text-[#002855] uppercase dark:text-sky-300">
-                      DECLARAÇÃO DE MATRÍCULA E VÍNCULO ACADÊMICO
+                    <h3
+                      data-testid="declaracao-main-title"
+                      className="text-xl font-black tracking-wide text-[#002855] uppercase dark:text-sky-300"
+                    >
+                      DECLARAÇÃO DE MATRÍCULA
                     </h3>
                     <div className="mx-auto mt-2 h-0.5 w-32 bg-[#004A8D]" />
                   </div>
@@ -2268,32 +2146,34 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                       {customAuthorizedCpf.trim()
                         ? `, inscrito(a) no CPF sob o nº ${customAuthorizedCpf.trim()}`
                         : ''}
-                      , é aluno(a) regularmente matriculado(a) nesta unidade de
-                      ensino sob o{' '}
+                      , encontra-se regularmente matriculado(a) nesta instituição
+                      de ensino sob a{' '}
                       <strong className="font-mono font-bold">
-                        Contrato nº #{fichaAcademica.student.contrato}
+                        Matrícula / Contrato nº #{fichaAcademica.student.contrato}
                       </strong>
-                      .
+                      , no ano letivo de{' '}
+                      <strong>{new Date().getFullYear()}</strong>.
                     </p>
 
                     <p>
-                      O(A) discente encontra-se matriculado(a) no curso{' '}
+                      O(A) discente frequenta o curso{' '}
                       <strong className="font-bold">
                         {fichaAcademica.student.cursoMatriculado}
                       </strong>
-                      , com data de início registrada em{' '}
+                      , com início em{' '}
                       <strong className="font-bold">
                         {fichaAcademica.student.dataMatricula}
                       </strong>
                       , na modalidade{' '}
-                      <strong>{fichaAcademica.student.modalidade}</strong>,
-                      cursando atualmente o módulo{' '}
+                      <strong>{fichaAcademica.student.modalidade}</strong> (Turno:{' '}
+                      <strong>{fichaAcademica.student.turno}</strong>), cursando
+                      atualmente a turma/módulo{' '}
                       <strong>{fichaAcademica.student.moduloAtual}</strong> nos
                       horários programados (
                       <span className="tabular-nums">
                         {fichaAcademica.student.diasHorariosResumo}
                       </span>
-                      ), apresentando situação cadastral{' '}
+                      ), apresentando situação de matrícula{' '}
                       <strong className="text-emerald-700 dark:text-emerald-400">
                         {fichaAcademica.student.situacaoMatricula}
                       </strong>
@@ -2318,7 +2198,7 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                       </div>
                       <div>
                         <span className="text-slate-500 dark:text-slate-400">
-                          Número do Contrato / Matrícula:
+                          Matrícula / Código do Aluno:
                         </span>
                         <p className="font-mono font-bold text-slate-900 dark:text-white">
                           #{fichaAcademica.student.contrato}
@@ -2326,26 +2206,28 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                       </div>
                       <div>
                         <span className="text-slate-500 dark:text-slate-400">
-                          CPF (Quando disponível e autorizado):
-                        </span>
-                        <p className="font-mono font-semibold text-slate-800 dark:text-slate-200">
-                          {customAuthorizedCpf.trim() ||
-                            'Não exibido (Proteção LGPD)'}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 dark:text-slate-400">
-                          Curso Matriculado:
+                          Curso / Série / Turma:
                         </span>
                         <p className="font-bold text-slate-900 dark:text-white">
-                          {fichaAcademica.student.cursoMatriculado}
+                          {fichaAcademica.student.cursoMatriculado} ·{' '}
+                          {fichaAcademica.student.moduloAtual}
                         </p>
                       </div>
                       <div>
                         <span className="text-slate-500 dark:text-slate-400">
-                          Data de Início do Curso:
+                          Turno / Horário:
                         </span>
                         <p className="font-semibold text-slate-800 dark:text-slate-200">
+                          {fichaAcademica.student.turno} (
+                          {fichaAcademica.student.diasHorariosResumo})
+                        </p>
+                      </div>
+                      <div>
+                        <span className="text-slate-500 dark:text-slate-400">
+                          Ano Letivo / Data de Início:
+                        </span>
+                        <p className="font-semibold text-slate-800 dark:text-slate-200">
+                          {new Date().getFullYear()} · Início em{' '}
                           {fichaAcademica.student.dataMatricula}
                         </p>
                       </div>
@@ -2355,22 +2237,6 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                         </span>
                         <p className="font-bold text-emerald-700 dark:text-emerald-400">
                           {fichaAcademica.student.situacaoMatricula}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 dark:text-slate-400">
-                          Unidade de Ensino / Razão Social:
-                        </span>
-                        <p className="font-semibold text-slate-800 dark:text-slate-200">
-                          {schoolInfo.nomeUnidade}
-                        </p>
-                      </div>
-                      <div>
-                        <span className="text-slate-500 dark:text-slate-400">
-                          CNPJ / Endereço da Unidade:
-                        </span>
-                        <p className="font-semibold text-slate-800 dark:text-slate-200">
-                          {schoolInfo.cnpj} · {schoolInfo.enderecoCompleto}
                         </p>
                       </div>
                     </div>
@@ -2391,62 +2257,25 @@ export const PortalAlunoHubView: React.FC<PortalAlunoHubViewProps> = ({
                         {fichaAcademica.student.unidadeEnsino}
                       </p>
                       <p className="mt-1 text-[11px] text-slate-400">
-                        (Campo reservado para assinatura física e carimbo da
-                        unidade escolar)
+                        (Espaço reservado para assinatura e validação institucional)
                       </p>
                     </div>
                   </div>
                 </div>
 
-                {/* Rodapé Institucional com Dados da Unidade */}
-                <div className="border-t border-slate-200 bg-[#002855] px-8 py-4 text-center text-xs text-sky-100">
-                  <p className="font-bold text-white">
-                    {schoolInfo.razaoSocial} · {schoolInfo.nomeUnidade}
-                  </p>
-                  <p className="mt-0.5 text-[11px] text-sky-200">
-                    {schoolInfo.enderecoCompleto} · {schoolInfo.cidadeUf} ·
-                    Atendimento: {schoolInfo.telefoneSecretaria}
+                {/* Rodapé Institucional — Mantém SOMENTE o nome da escola conforme Seção 13 */}
+                <div
+                  data-testid="declaracao-footer-school-only"
+                  className="border-t border-slate-200 bg-[#002855] px-8 py-4 text-center text-xs text-white"
+                >
+                  <p className="font-bold tracking-wide uppercase">
+                    {schoolInfo.nomeUnidade}
                   </p>
                 </div>
               </article>
             </div>
           )}
         </section>
-      )}
-
-      {/* Modal de Avaliação NPS Priorizada no Portal do Aluno (Seção 1.3 e Módulo 2) */}
-      {activePortalNpsModalInvite && (
-        <NpsPortalEvaluationModal
-          invitation={activePortalNpsModalInvite}
-          studentName={
-            selectedStudentItem?.nomeCompleto ||
-            activePortalNpsModalInvite.studentName
-          }
-          contrato={
-            selectedStudentItem?.contrato ||
-            activePortalNpsModalInvite.contrato
-          }
-          onCloseWithoutSubmit={() => {
-            // Caso o aluno feche o modal sem concluir a avaliação, a pesquisa NÃO é marcada como respondida
-            setDismissedPortalInviteIdsInSession((prev) => {
-              const next = new Set(prev);
-              next.add(activePortalNpsModalInvite.id);
-              return next;
-            });
-            setActivePortalNpsModalInvite(null);
-          }}
-          onSubmitted={(res) => {
-            onNpsInvitationUpdated?.(res.inviteId, {
-              answered: true,
-              invitationStatus: 'respondido',
-              priorizarNpsNoLogin: false,
-              notaNps: res.nota,
-              comentarioNps: res.comentario,
-              answeredAt: res.answeredAt,
-            });
-            setActivePortalNpsModalInvite(null);
-          }}
-        />
       )}
     </div>
   );

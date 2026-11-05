@@ -144,7 +144,7 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
           data-column-state={
             col.isCurrentHour ? 'current' : col.isPastHour ? 'past' : 'future'
           }
-          className={`flex h-full w-[325px] shrink-0 flex-col overflow-hidden rounded-xl transition-colors sm:w-[342px] ${columnContainerClasses}`}
+          className={`flex h-full w-[335px] shrink-0 flex-col overflow-hidden rounded-xl transition-colors sm:w-[350px] ${columnContainerClasses}`}
         >
           {/* Cabeçalho da Coluna */}
           <div className={`shrink-0 px-3 py-2 ${columnHeaderClasses}`}>
@@ -191,8 +191,8 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
             </div>
           </div>
 
-          {/* Cards enxutos de NPS */}
-          <div className="flex flex-1 flex-col gap-1.5 overflow-y-auto p-2">
+          {/* Cards padronizados de NPS (mesmas dimensões e alinhamento do Kanban de Alunos) */}
+          <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-2.5">
             {col.invitations.map((card) => {
               const latest = card.latestActiveInvitation;
               const isPortal = latest.origem === 'Portal do Aluno';
@@ -215,11 +215,13 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
                   ? 'border-rose-300 bg-rose-50 text-rose-800 dark:border-rose-800/70 dark:bg-rose-950/60 dark:text-rose-300'
                   : 'border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800/70 dark:bg-amber-950/60 dark:text-amber-300';
               const salaClean = formatFullSalaName(card.linkedSala);
+              const cursoClean = card.linkedCurso || 'Módulo Regular';
 
               return (
                 <article
                   key={`${card.linkedContrato}-${latest.id}`}
                   onClick={() => onSelectStudentCard(card)}
+                  data-testid="nps-student-card"
                   data-nps-student-contrato={card.linkedContrato}
                   data-nps-control-id={latest.controlId}
                   data-nps-origem={latest.origem}
@@ -228,13 +230,13 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
                   data-nps-portal-prioritized={
                     isPrioritizedOnPortal ? 'true' : 'false'
                   }
-                  className={`group cursor-pointer rounded-lg border bg-white p-2.5 transition-all duration-150 hover:shadow-xs dark:bg-slate-900 ${
+                  className={`group flex flex-col justify-between cursor-pointer rounded-lg border bg-white p-3 transition-all duration-150 hover:shadow-xs dark:bg-slate-900 ${
                     isResponsavel
                       ? 'border-fuchsia-200/90 hover:border-fuchsia-400 dark:border-fuchsia-900/70 dark:hover:border-fuchsia-600'
                       : 'border-slate-200/90 hover:border-purple-400 dark:border-slate-800 dark:hover:border-purple-600'
                   }`}
                 >
-                  {/* Linha 1: Nome do aluno menor e sem quebra de linha + Canal */}
+                  {/* Cabeçalho do Card: Nome do aluno + Canal */}
                   <div className="flex items-center justify-between gap-2">
                     <h3
                       title={card.linkedStudentName}
@@ -259,16 +261,33 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
                     </span>
                   </div>
 
-                  {/* Linha 2: Sala (sem modalidade) + Ciclo e Status de envio */}
-                  <div className="mt-1.5 flex items-center justify-between gap-1.5">
-                    <span
-                      className="truncate text-[11px] font-semibold text-slate-700 dark:text-slate-300"
-                      title={salaClean}
-                    >
-                      {salaClean}
-                    </span>
+                  {/* Bloco Vertical Padronizado em 3 Linhas: 1ª Sala | 2ª Matéria | 3ª Ciclo & Status */}
+                  <div className="mt-2 flex flex-col gap-1 rounded-md border border-slate-100 bg-slate-50/70 px-2.5 py-1.5 text-[11px] leading-snug dark:border-slate-800/80 dark:bg-slate-800/40">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="shrink-0 font-semibold text-slate-500 dark:text-slate-400">
+                        Sala:
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 truncate font-bold text-slate-800 dark:text-slate-200"
+                        title={salaClean}
+                      >
+                        {salaClean}
+                      </span>
+                    </div>
 
-                    <div className="flex shrink-0 items-center gap-1">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="shrink-0 font-semibold text-slate-500 dark:text-slate-400">
+                        Matéria:
+                      </span>
+                      <span
+                        className="min-w-0 flex-1 truncate font-medium text-slate-700 dark:text-slate-300"
+                        title={cursoClean}
+                      >
+                        {cursoClean}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between gap-1.5 min-w-0 pt-0.5">
                       <span
                         data-testid="nps-card-recipient-badge"
                         className={`typo-badge inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-semibold whitespace-nowrap ${
@@ -290,10 +309,10 @@ export const NpsHourKanbanBoard: React.FC<NpsHourKanbanBoardProps> = React.memo(
                     </div>
                   </div>
 
-                  {/* Linha 3: Ações rápidas (Reenviar E-mail e Priorizar Portal) */}
+                  {/* Rodapé do Card: Ações rápidas (Reenviar E-mail e Priorizar Portal) */}
                   {isAuthorizedForRecovery && (
                     <div
-                      className="mt-2 grid grid-cols-2 gap-1.5 border-t border-slate-100 pt-1.5 dark:border-slate-800"
+                      className="mt-2 grid grid-cols-2 gap-1.5 border-t border-slate-100 pt-2 dark:border-slate-800"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <button

@@ -371,6 +371,7 @@ export type ConsolidatedColumnId =
   | 'nomeCompleto'
   | 'contrato'
   | 'formacao'
+  | 'educador'
   | 'cadNome'
   | 'unidade'
   | 'municipio'
@@ -410,7 +411,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'nomeCompleto',
     label: 'Nome do Aluno',
     shortLabel: 'Nome do Aluno',
-    widthPx: 250,
+    widthPx: 230,
     defaultVisible: true,
     align: 'left',
     sortableField: 'nomeCompleto',
@@ -419,8 +420,8 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
   {
     id: 'contrato',
     label: 'Nº do Contrato',
-    shortLabel: 'Nº do Contrato',
-    widthPx: 130,
+    shortLabel: 'Contrato',
+    widthPx: 115,
     defaultVisible: true,
     align: 'left',
     sortableField: 'contrato',
@@ -430,7 +431,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'formacao',
     label: 'Formação do Aluno',
     shortLabel: 'Formação',
-    widthPx: 205,
+    widthPx: 190,
     defaultVisible: true,
     align: 'left',
     sortableField: 'formacao',
@@ -441,7 +442,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'modulo',
     label: 'Curso / Módulo',
     shortLabel: 'Módulo',
-    widthPx: 215,
+    widthPx: 195,
     defaultVisible: true,
     align: 'left',
     sortableField: 'modulo',
@@ -449,10 +450,21 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     exportable: true,
   },
   {
+    id: 'educador',
+    label: 'Educador',
+    shortLabel: 'Educador',
+    widthPx: 175,
+    defaultVisible: true,
+    align: 'left',
+    sortableField: 'educador',
+    groupableField: 'educador',
+    exportable: true,
+  },
+  {
     id: 'aulaAtual',
     label: 'Aula Atual',
     shortLabel: 'Aula Atual',
-    widthPx: 115,
+    widthPx: 105,
     defaultVisible: true,
     align: 'center',
     sortableField: 'aulaAtual',
@@ -462,7 +474,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'frequencia',
     label: 'Frequência',
     shortLabel: 'Frequência',
-    widthPx: 120,
+    widthPx: 110,
     defaultVisible: true,
     align: 'center',
     sortableField: 'frequencia',
@@ -472,7 +484,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'diaSemana',
     label: 'Dia da Aula',
     shortLabel: 'Dia da Aula',
-    widthPx: 140,
+    widthPx: 130,
     defaultVisible: true,
     align: 'left',
     sortableField: 'diaSemana',
@@ -483,7 +495,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'horario',
     label: 'Horário',
     shortLabel: 'Horário',
-    widthPx: 115,
+    widthPx: 105,
     defaultVisible: true,
     align: 'left',
     sortableField: 'horario',
@@ -494,7 +506,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'sala',
     label: 'Sala',
     shortLabel: 'Sala',
-    widthPx: 175,
+    widthPx: 155,
     defaultVisible: true,
     align: 'left',
     sortableField: 'sala',
@@ -505,7 +517,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'categoria',
     label: 'Categoria',
     shortLabel: 'Categoria',
-    widthPx: 135,
+    widthPx: 125,
     defaultVisible: true,
     align: 'center',
     sortableField: 'categoria',
@@ -516,7 +528,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'apostila',
     label: 'Apostila',
     shortLabel: 'Apostila',
-    widthPx: 130,
+    widthPx: 120,
     defaultVisible: true,
     align: 'center',
     sortableField: 'apostila',
@@ -526,7 +538,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'financeiro',
     label: 'Financeiro',
     shortLabel: 'Financeiro',
-    widthPx: 130,
+    widthPx: 120,
     defaultVisible: true,
     align: 'center',
     sortableField: 'financeiro',
@@ -536,7 +548,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'alertas',
     label: 'Alertas / NPS',
     shortLabel: 'Alertas / NPS',
-    widthPx: 150,
+    widthPx: 140,
     defaultVisible: true,
     align: 'center',
     sortableField: 'alertas',
@@ -545,8 +557,8 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
   {
     id: 'agendamentos',
     label: 'Agendamentos',
-    shortLabel: 'Agendamentos',
-    widthPx: 125,
+    shortLabel: 'Agend.',
+    widthPx: 115,
     defaultVisible: false,
     align: 'center',
     sortableField: 'agendamentos',
@@ -556,7 +568,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'turno',
     label: 'Período (Turno)',
     shortLabel: 'Período',
-    widthPx: 125,
+    widthPx: 115,
     defaultVisible: false,
     align: 'center',
     sortableField: 'turno',
@@ -566,7 +578,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'telefoneAluno',
     label: 'Telefone do Aluno',
     shortLabel: 'Telefone',
-    widthPx: 145,
+    widthPx: 140,
     defaultVisible: false,
     align: 'left',
     exportable: true,
@@ -575,7 +587,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'nomeResponsavel',
     label: 'Responsável',
     shortLabel: 'Responsável',
-    widthPx: 170,
+    widthPx: 160,
     defaultVisible: false,
     align: 'left',
     exportable: true,
@@ -584,7 +596,7 @@ export const CONSOLIDATED_TABLE_COLUMNS: ConsolidatedColumnDef[] = [
     id: 'acoes',
     label: 'Ações',
     shortLabel: 'Ações',
-    widthPx: 165,
+    widthPx: 150,
     defaultVisible: true,
     align: 'right',
     exportable: false,
@@ -749,6 +761,8 @@ export function getStudentColumnDisplayValue(
       return `#${st.contrato}`;
     case 'formacao':
       return st.formacao || st.capacitacao;
+    case 'educador':
+      return st.educador || 'Sem vínculo válido';
     case 'cadNome':
       return st.cadNome || 'CAD 01 - Presidente Prudente';
     case 'unidade':
@@ -803,6 +817,10 @@ export function getStudentColumnFilterTokens(
   colId: ConsolidatedColumnId
 ): string[] {
   switch (colId) {
+    case 'educador':
+      return st.educadores && st.educadores.length > 0
+        ? st.educadores
+        : [st.educador || 'Sem vínculo válido'];
     case 'diaSemana':
       return st.diasSemana.length > 0 ? st.diasSemana : ['Não informado'];
     case 'horario':
@@ -880,6 +898,7 @@ export function matchesMultiValueColumnFilters(
 export type GroupByField =
   | 'formacao'
   | 'modulo'
+  | 'educador'
   | 'financeiro'
   | 'contrato'
   | 'cadNome'
@@ -900,12 +919,13 @@ export interface GroupByFieldDef {
 }
 
 /**
- * As 7 opções específicas de agrupamento disponíveis como ícone na lista de colunas à esquerda da tabela:
- * Formação, Módulo, Dia da Aula, Horário, Sala, Modalidade e Categoria.
+ * Opções de agrupamento disponíveis como ícone na lista de colunas à esquerda da tabela:
+ * Formação, Módulo, Educador, Dia da Aula, Horário, Sala e Categoria.
  */
 export const GROUPABLE_FIELDS: GroupByFieldDef[] = [
   { field: 'formacao', label: 'Formação do Aluno' },
   { field: 'modulo', label: 'Curso / Módulo' },
+  { field: 'educador', label: 'Educador' },
   { field: 'diaSemana', label: 'Dia da Aula' },
   { field: 'horario', label: 'Horário' },
   { field: 'sala', label: 'Sala' },
@@ -920,6 +940,8 @@ export function getGroupFieldLabel(field: GroupByField): string {
       return 'Formação do Aluno';
     case 'modulo':
       return 'Curso / Módulo';
+    case 'educador':
+      return 'Educador';
     case 'diaSemana':
       return 'Dia da Aula';
     case 'horario':
@@ -944,6 +966,8 @@ export function extractStudentGroupValue(
   switch (field) {
     case 'formacao':
       return st.formacao || st.capacitacao || 'Formação Profissional';
+    case 'educador':
+      return st.educador || 'Sem vínculo válido';
     case 'contrato':
       return `Contrato #${st.contrato}`;
     case 'cadNome':

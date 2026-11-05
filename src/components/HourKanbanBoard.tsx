@@ -123,7 +123,7 @@ export const HourKanbanBoard: React.FC<HourKanbanBoardProps> = React.memo(({
         data-column-state={
           col.isCurrentHour ? 'current' : col.isPastHour ? 'past' : 'future'
         }
-        className={`flex h-full w-[325px] shrink-0 flex-col overflow-hidden rounded-xl transition-colors sm:w-[342px] ${columnContainerClasses}`}
+        className={`flex h-full w-[335px] shrink-0 flex-col overflow-hidden rounded-xl transition-colors sm:w-[350px] ${columnContainerClasses}`}
       >
         {/* Cabeçalho da Coluna */}
         <div className={`shrink-0 px-3 py-2 ${columnHeaderClasses}`}>
@@ -214,8 +214,8 @@ export const HourKanbanBoard: React.FC<HourKanbanBoardProps> = React.memo(({
           </div>
         </div>
 
-        {/* Cards enxutos: apenas o essencial para o professor */}
-        <div className="flex flex-1 flex-col gap-1.5 overflow-y-auto p-2">
+        {/* Cards padronizados com 3 linhas verticais (Sala, Matéria, Professor) */}
+        <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-2.5">
           {col.students.map((student) => {
             const stageBadge = getStudentStageBadge(student);
             const cardSurface = getCardSurfaceClasses(student);
@@ -223,11 +223,15 @@ export const HourKanbanBoard: React.FC<HourKanbanBoardProps> = React.memo(({
             const moduloDisplay = formatModuleDisplay(
               student.moduloAtual || student.curso
             );
+            const professorDisplay =
+              (student.educador || student.professor || '').trim() ||
+              'Não informado';
 
             return (
               <article
                 key={student.id}
                 onClick={() => onSelectStudent(student.id)}
+                data-testid="kanban-student-card"
                 data-attendance-status={student.attendanceStatus}
                 data-schedule-stage={student.scheduleStage}
                 data-evasao={student.isEvasao ? 'true' : 'false'}
@@ -240,9 +244,9 @@ export const HourKanbanBoard: React.FC<HourKanbanBoardProps> = React.memo(({
                 data-situacao-financeira={
                   student.inadimplente ? 'EM_ATRASO' : 'EM_DIA'
                 }
-                className={`group cursor-pointer rounded-lg border p-2.5 transition-all duration-150 hover:shadow-xs ${cardSurface}`}
+                className={`group flex flex-col justify-between cursor-pointer rounded-lg border p-3 transition-all duration-150 hover:shadow-xs ${cardSurface}`}
               >
-                {/* Linha 1: Nome do aluno menor e sem quebra de linha + Status */}
+                {/* Cabeçalho do Card: Nome do aluno + Status */}
                 <div className="flex items-center justify-between gap-2">
                   <h3
                     title={student.nomeCompleto}
@@ -261,27 +265,50 @@ export const HourKanbanBoard: React.FC<HourKanbanBoardProps> = React.memo(({
                   </span>
                 </div>
 
-                {/* Linha 2: Sala (sem modalidade) + Módulo */}
-                <div className="mt-1 flex items-center justify-between gap-1.5 text-[11px] text-slate-600 dark:text-slate-300">
-                  <span
-                    data-testid="student-card-sala"
-                    className="shrink-0 font-semibold text-slate-700 dark:text-slate-300"
-                    title={salaDisplay}
-                  >
-                    {salaDisplay}
-                  </span>
-                  <span className="text-slate-300 dark:text-slate-600">·</span>
-                  <span
-                    data-testid="student-card-modulo"
-                    title={moduloDisplay}
-                    className="min-w-0 flex-1 truncate font-medium text-slate-700 dark:text-slate-300"
-                  >
-                    {moduloDisplay}
-                  </span>
+                {/* Bloco Vertical em 3 Linhas: 1ª Sala | 2ª Matéria | 3ª Professor */}
+                <div className="mt-2 flex flex-col gap-1 rounded-md border border-slate-100 bg-slate-50/70 px-2.5 py-1.5 text-[11px] leading-snug dark:border-slate-800/80 dark:bg-slate-800/40">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="shrink-0 font-semibold text-slate-500 dark:text-slate-400">
+                      Sala:
+                    </span>
+                    <span
+                      data-testid="student-card-sala"
+                      className="min-w-0 flex-1 truncate font-bold text-slate-800 dark:text-slate-200"
+                      title={salaDisplay}
+                    >
+                      {salaDisplay}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="shrink-0 font-semibold text-slate-500 dark:text-slate-400">
+                      Matéria:
+                    </span>
+                    <span
+                      data-testid="student-card-modulo"
+                      title={moduloDisplay}
+                      className="min-w-0 flex-1 truncate font-medium text-slate-700 dark:text-slate-300"
+                    >
+                      {moduloDisplay}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="shrink-0 font-semibold text-slate-500 dark:text-slate-400">
+                      Professor:
+                    </span>
+                    <span
+                      data-testid="student-card-professor"
+                      title={professorDisplay}
+                      className="min-w-0 flex-1 truncate font-semibold text-[#004A8D] dark:text-sky-300"
+                    >
+                      {professorDisplay}
+                    </span>
+                  </div>
                 </div>
 
-                {/* Linha 3: Aula atual, indicadores essenciais e atalhos rápidos */}
-                <div className="mt-1.5 flex items-center justify-between gap-1.5 border-t border-slate-100 pt-1.5 dark:border-slate-800">
+                {/* Rodapé do Card: Aula atual, indicadores essenciais e atalhos rápidos */}
+                <div className="mt-2 flex items-center justify-between gap-1.5 border-t border-slate-100 pt-2 dark:border-slate-800">
                   <div className="flex min-w-0 items-center gap-1.5 text-[11px]">
                     <span className="rounded border border-slate-200/80 bg-slate-50 px-1.5 py-0.5 font-semibold whitespace-nowrap text-slate-700 tabular-nums dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200">
                       {student.aulaAtualLabel}

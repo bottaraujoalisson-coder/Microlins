@@ -5,6 +5,7 @@ import {
   AuthSession,
   createDefaultSchoolsRegistry,
   DEFAULT_ADMIN_CREDENTIALS,
+  generateInternalSchoolId,
   normalizeLoginIdentifier,
   RegisteredSchool,
   SchoolPortalUser,
@@ -178,6 +179,7 @@ export function getDatabase(customPath?: string): DatabaseSync {
   dbInstance = db;
 
   if (currentDbFilePath !== ':memory:') {
+    db.exec('PRAGMA busy_timeout = 5000;');
     db.exec('PRAGMA journal_mode = WAL;');
   }
   db.exec('PRAGMA foreign_keys = ON;');
@@ -349,6 +351,69 @@ function runMigrations(db: DatabaseSync): void {
         CREATE INDEX IF NOT EXISTS idx_nps_records_school_id ON nps_records(school_id);
         CREATE INDEX IF NOT EXISTS idx_nps_records_escola_codigo ON nps_records(escola_codigo);
         CREATE INDEX IF NOT EXISTS idx_nps_records_contrato ON nps_records(contrato);
+      `,
+    },
+    {
+      version: 4,
+      name: '004_multitenancy_internal_id_and_sync_logs',
+      sql: `
+        CREATE TABLE IF NOT EXISTS audit_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp TEXT NOT NULL,
+          actor_login TEXT NOT NULL,
+          actor_role TEXT NOT NULL,
+          action TEXT NOT NULL,
+          resource TEXT NOT NULL,
+          status TEXT NOT NULL,
+          ip_address TEXT NOT NULL DEFAULT '',
+          details TEXT NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_login);
+
+        CREATE TABLE IF NOT EXISTS sync_logs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          school_id TEXT NOT NULL,
+          escola_codigo TEXT NOT NULL DEFAULT '',
+          sync_type TEXT NOT NULL,
+          weekday_code TEXT,
+          status TEXT NOT NULL,
+          records_received INTEGER NOT NULL DEFAULT 0,
+          records_inserted INTEGER NOT NULL DEFAULT 0,
+          records_updated INTEGER NOT NULL DEFAULT 0,
+          divergences_count INTEGER NOT NULL DEFAULT 0,
+          duration_ms INTEGER NOT NULL DEFAULT 0,
+          error_message TEXT,
+          created_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sync_logs_school_id ON sync_logs(school_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS student_educators_v2 (
+          school_id TEXT NOT NULL DEFAULT 'school-1875',
+          contrato TEXT NOT NULL,
+          nome_aluno TEXT NOT NULL,
+          educador_nome TEXT NOT NULL,
+          escola_codigo TEXT NOT NULL DEFAULT '1875',
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (school_id, contrato)
+        );
+
+        INSERT OR IGNORE INTO student_educators_v2 (school_id, contrato, nome_aluno, educador_nome, escola_codigo, updated_at)
+        SELECT 'school-' || escola_codigo, contrato, nome_aluno, educador_nome, escola_codigo, updated_at
+        FROM student_educators;
+
+        DROP TABLE IF EXISTS student_educators;
+        ALTER TABLE student_educators_v2 RENAME TO student_educators;
+
+        CREATE INDEX IF NOT EXISTS idx_student_educators_school ON student_educators(school_id);
+        CREATE INDEX IF NOT EXISTS idx_student_educators_educador ON student_educators(educador_nome);
+        CREATE INDEX IF NOT EXISTS idx_student_educators_escola ON student_educators(escola_codigo);
+
+        CREATE INDEX IF NOT EXISTS idx_student_records_school_dia ON student_records(school_id, dia_semana);
+        CREATE INDEX IF NOT EXISTS idx_student_records_school_contrato ON student_records(school_id, contrato);
+        CREATE INDEX IF NOT EXISTS idx_nps_records_school_contrato ON nps_records(school_id, contrato);
       `,
     },
   ];
@@ -592,9 +657,13 @@ export function getSchoolsFromDb(decryptSecretsForInternalSync: boolean = false)
         companyFilter: row.nps_company_filter
           ? String(row.nps_company_filter)
           : undefined,
-        companyId: process.env.INDECX_COMPANY_ID || '',
-        groupId: process.env.INDECX_GROUP_ID || '',
-        baseUrl: String(row.nps_base_url || 'https://app.indecx.com'),
+        companyId:
+          process.env.INDECX_COMPANY_ID ||
+          '624464ee5314e75c907b920c',
+        groupId:
+          process.env.INDECX_GROUP_ID ||
+          '625f1c105afd9b2f276dd44a',
+        baseUrl: String(row.nps_base_url || 'https://v3.app-indecx.com'),
         active: isNpsActive,
         connectionStatus: isNpsActive ? 'CONECTADO' : 'NAO_CONFIGURADO',
         lastTestStatus: isNpsActive ? 'SUCCESS' : undefined,
@@ -683,13 +752,7 @@ export function upsertSchoolInDb(input: {
     );
     targetId = String(existing.id);
   } else {
-    const slug = nome
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    targetId = input.id || `school-${slug}-${Date.now().toString(36)}`;
+    targetId = input.id || generateInternalSchoolId();
 
     db.prepare(
       `INSERT INTO schools (
@@ -1492,7 +1555,75 @@ export function resetPasswordWithRecoveryTokenInDb(
 /**
  * Stubs vazios (Logs de auditoria e solicitações LGPD removidos por diretriz arquitetural).
  */
-export function recordAuditLog(_entry: {
+export interface SyncLogEntry {
+  id: number;
+  schoolId: string;
+  escolaCodigo: string;
+  syncType: string;
+  weekdayCode?: string | null;
+  status: 'SUCCESS' | 'PARTIAL' | 'ERROR';
+  recordsReceived: number;
+  recordsInserted: number;
+  recordsUpdated: number;
+  divergencesCount: number;
+  durationMs: number;
+  errorMessage?: string | null;
+  createdAt: string;
+}
+
+const activeSchoolSyncLocks = new Map<
+  string,
+  { holder: string; acquiredAt: number; expiresAt: number }
+>();
+
+/**
+ * Adquire lock exclusivo de sincronização por unidade escolar (school_id),
+ * evitando concorrência destrutiva ou duplicação quando múltiplos usuários da mesma escola sincronizam simultaneamente.
+ */
+export function acquireSchoolSyncLock(
+  schoolId: string,
+  holder: string = 'system',
+  ttlMs: number = 30_000
+): boolean {
+  const key = String(schoolId || 'school-1875').trim();
+  const now = Date.now();
+  const existing = activeSchoolSyncLocks.get(key);
+  if (existing && existing.expiresAt > now) {
+    return false;
+  }
+  activeSchoolSyncLocks.set(key, {
+    holder,
+    acquiredAt: now,
+    expiresAt: now + ttlMs,
+  });
+  return true;
+}
+
+export function releaseSchoolSyncLock(schoolId: string): void {
+  const key = String(schoolId || 'school-1875').trim();
+  activeSchoolSyncLocks.delete(key);
+}
+
+export function isSchoolSyncLocked(schoolId: string): boolean {
+  const key = String(schoolId || 'school-1875').trim();
+  const existing = activeSchoolSyncLocks.get(key);
+  if (!existing) return false;
+  if (existing.expiresAt <= Date.now()) {
+    activeSchoolSyncLocks.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function redactSensitiveLogDetails(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .replace(/"(senha|password|portalPassword|npsPassword|token|secret)"\s*:\s*"[^"]*"/gi, '"$1":"[REDACTED]"')
+    .replace(/(senha|password|secret|token)=([^\s&]+)/gi, '$1=[REDACTED]')
+    .slice(0, 1200);
+}
+
+export function recordAuditLog(entry: {
   actorLogin: string;
   actorRole: string;
   action: string;
@@ -1501,11 +1632,125 @@ export function recordAuditLog(_entry: {
   ipAddress?: string;
   details?: string;
 }): void {
-  // No-op: log do sistema desativado/removido
+  try {
+    const db = getDatabase();
+    db.prepare(
+      `INSERT INTO audit_logs (
+        timestamp, actor_login, actor_role, action, resource, status, ip_address, details
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      new Date().toISOString(),
+      sanitizeInputText(entry.actorLogin || 'anonymous', 120),
+      sanitizeInputText(entry.actorRole || 'SYSTEM', 60),
+      sanitizeInputText(entry.action || 'EVENT', 100),
+      sanitizeInputText(entry.resource || 'system', 160),
+      entry.status || 'SUCCESS',
+      sanitizeInputText(entry.ipAddress || '127.0.0.1', 64),
+      redactSensitiveLogDetails(entry.details || '')
+    );
+  } catch {
+    // Evita falha em cascata caso o banco esteja em migração
+  }
 }
 
-export function getAuditLogsFromDb(_limit: number = 100): AuditLogEntry[] {
-  return [];
+export function getAuditLogsFromDb(limit: number = 100): AuditLogEntry[] {
+  try {
+    const db = getDatabase();
+    const safeLimit = Math.max(1, Math.min(500, Number(limit) || 100));
+    const rows = db
+      .prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?')
+      .all(safeLimit) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: Number(r.id),
+      timestamp: String(r.timestamp),
+      actorLogin: String(r.actor_login),
+      actorRole: String(r.actor_role),
+      action: String(r.action),
+      resource: String(r.resource),
+      status: (r.status as 'SUCCESS' | 'DENIED' | 'ERROR') || 'SUCCESS',
+      ipAddress: String(r.ip_address || ''),
+      details: String(r.details || ''),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function recordSyncLog(entry: {
+  schoolId: string;
+  escolaCodigo?: string;
+  syncType: string;
+  weekdayCode?: string;
+  status: 'SUCCESS' | 'PARTIAL' | 'ERROR';
+  recordsReceived?: number;
+  recordsInserted?: number;
+  recordsUpdated?: number;
+  divergencesCount?: number;
+  durationMs?: number;
+  errorMessage?: string;
+}): void {
+  try {
+    const db = getDatabase();
+    db.prepare(
+      `INSERT INTO sync_logs (
+        school_id, escola_codigo, sync_type, weekday_code, status,
+        records_received, records_inserted, records_updated, divergences_count,
+        duration_ms, error_message, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      String(entry.schoolId || 'school-1875'),
+      String(entry.escolaCodigo || '1875'),
+      sanitizeInputText(entry.syncType || 'PORTAL_SYNC', 80),
+      entry.weekdayCode ? String(entry.weekdayCode) : null,
+      entry.status || 'SUCCESS',
+      Number(entry.recordsReceived || 0),
+      Number(entry.recordsInserted || 0),
+      Number(entry.recordsUpdated || 0),
+      Number(entry.divergencesCount || 0),
+      Number(entry.durationMs || 0),
+      entry.errorMessage ? redactSensitiveLogDetails(entry.errorMessage) : null,
+      new Date().toISOString()
+    );
+  } catch {
+    // Ignore sync log error during migration
+  }
+}
+
+export function getSyncLogsFromDb(
+  schoolId?: string,
+  limit: number = 50
+): SyncLogEntry[] {
+  try {
+    const db = getDatabase();
+    const safeLimit = Math.max(1, Math.min(250, Number(limit) || 50));
+    const rows = schoolId
+      ? (db
+          .prepare(
+            'SELECT * FROM sync_logs WHERE school_id = ? ORDER BY id DESC LIMIT ?'
+          )
+          .all(schoolId, safeLimit) as Array<Record<string, unknown>>)
+      : (db
+          .prepare('SELECT * FROM sync_logs ORDER BY id DESC LIMIT ?')
+          .all(safeLimit) as Array<Record<string, unknown>>);
+
+    return rows.map((r) => ({
+      id: Number(r.id),
+      schoolId: String(r.school_id),
+      escolaCodigo: String(r.escola_codigo || ''),
+      syncType: String(r.sync_type),
+      weekdayCode: r.weekday_code ? String(r.weekday_code) : null,
+      status: (r.status as 'SUCCESS' | 'PARTIAL' | 'ERROR') || 'SUCCESS',
+      recordsReceived: Number(r.records_received || 0),
+      recordsInserted: Number(r.records_inserted || 0),
+      recordsUpdated: Number(r.records_updated || 0),
+      divergencesCount: Number(r.divergences_count || 0),
+      durationMs: Number(r.duration_ms || 0),
+      errorMessage: r.error_message ? String(r.error_message) : null,
+      createdAt: String(r.created_at),
+    }));
+  } catch {
+    return [];
+  }
 }
 
 export function createLgpdRequestInDb(_input: {
@@ -1549,6 +1794,14 @@ export function getDatabaseStatusSummary(): DatabaseStatusSummary {
         .get(new Date().toISOString()) as { c: number }
     ).c
   );
+  let auditLogsCount = 0;
+  try {
+    auditLogsCount = Number(
+      (db.prepare('SELECT COUNT(*) as c FROM audit_logs').get() as { c: number }).c
+    );
+  } catch {
+    auditLogsCount = 0;
+  }
 
   let fileSizeBytes = 0;
   if (currentDbFilePath !== ':memory:' && fs.existsSync(currentDbFilePath)) {
@@ -1575,7 +1828,7 @@ export function getDatabaseStatusSummary(): DatabaseStatusSummary {
       schools: schoolsCount,
       users: usersCount,
       activeSessions: sessionsCount,
-      auditLogs: 0,
+      auditLogs: auditLogsCount,
       lgpdRequests: 0,
       backupsCount: 0,
     },
@@ -1589,6 +1842,7 @@ export function getDatabaseStatusSummary(): DatabaseStatusSummary {
 }
 
 export interface StudentEducatorCacheEntry {
+  schoolId: string;
   contrato: string;
   nomeAluno: string;
   educadorNome: string;
@@ -1600,39 +1854,55 @@ export function upsertStudentEducator(
   contrato: string,
   nomeAluno: string,
   educadorNome: string,
-  escolaCodigo: string = '1875'
+  escolaCodigo: string = '1875',
+  schoolId?: string
 ): void {
   const db = getDatabase();
   const cleanContrato = String(contrato || '').trim();
   const cleanEducador = String(educadorNome || '').trim();
   const cleanAluno = String(nomeAluno || '').trim();
   const cleanEscola = String(escolaCodigo || '1875').trim();
+  const effectiveSchoolId = String(schoolId || `school-${cleanEscola}`).trim();
   if (!cleanContrato || !cleanEducador) return;
 
   const now = new Date().toISOString();
   db.prepare(`
-    INSERT INTO student_educators (contrato, nome_aluno, educador_nome, escola_codigo, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(contrato) DO UPDATE SET
+    INSERT INTO student_educators (school_id, contrato, nome_aluno, educador_nome, escola_codigo, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(school_id, contrato) DO UPDATE SET
       nome_aluno = CASE WHEN excluded.nome_aluno <> '' THEN excluded.nome_aluno ELSE student_educators.nome_aluno END,
       educador_nome = excluded.educador_nome,
       escola_codigo = excluded.escola_codigo,
       updated_at = excluded.updated_at
-  `).run(cleanContrato, cleanAluno, cleanEducador, cleanEscola, now);
+  `).run(effectiveSchoolId, cleanContrato, cleanAluno, cleanEducador, cleanEscola, now);
 }
 
 export function getStudentEducatorsMap(
-  escolaCodigo: string = '1875'
+  escolaCodigo: string = '1875',
+  schoolId?: string
 ): Map<string, { educadorNome: string; nomeAluno: string; updatedAt: string }> {
   const db = getDatabase();
-  const rows = db.prepare(
-    'SELECT contrato, nome_aluno, educador_nome, updated_at FROM student_educators WHERE escola_codigo = ?'
-  ).all(escolaCodigo) as Array<{
-    contrato: string;
-    nome_aluno: string;
-    educador_nome: string;
-    updated_at: string;
-  }>;
+  const rows = schoolId
+    ? (db
+        .prepare(
+          'SELECT contrato, nome_aluno, educador_nome, updated_at FROM student_educators WHERE school_id = ?'
+        )
+        .all(schoolId) as Array<{
+        contrato: string;
+        nome_aluno: string;
+        educador_nome: string;
+        updated_at: string;
+      }>)
+    : (db
+        .prepare(
+          'SELECT contrato, nome_aluno, educador_nome, updated_at FROM student_educators WHERE escola_codigo = ?'
+        )
+        .all(escolaCodigo) as Array<{
+        contrato: string;
+        nome_aluno: string;
+        educador_nome: string;
+        updated_at: string;
+      }>);
 
   const map = new Map<string, { educadorNome: string; nomeAluno: string; updatedAt: string }>();
   for (const r of rows) {
@@ -1645,23 +1915,42 @@ export function getStudentEducatorsMap(
   return map;
 }
 
-export function getEducatorStats(escolaCodigo: string = '1875'): Array<{
+export function getEducatorStats(
+  escolaCodigo: string = '1875',
+  schoolId?: string
+): Array<{
   educadorNome: string;
   totalAlunos: number;
   lastUpdated: string;
 }> {
   const db = getDatabase();
-  const rows = db.prepare(`
-    SELECT educador_nome, COUNT(*) as total_alunos, MAX(updated_at) as last_updated
-    FROM student_educators
-    WHERE escola_codigo = ?
-    GROUP BY educador_nome
-    ORDER BY total_alunos DESC
-  `).all(escolaCodigo) as Array<{
-    educador_nome: string;
-    total_alunos: number;
-    last_updated: string;
-  }>;
+  const rows = schoolId
+    ? (db
+        .prepare(`
+          SELECT educador_nome, COUNT(*) as total_alunos, MAX(updated_at) as last_updated
+          FROM student_educators
+          WHERE school_id = ?
+          GROUP BY educador_nome
+          ORDER BY total_alunos DESC
+        `)
+        .all(schoolId) as Array<{
+        educador_nome: string;
+        total_alunos: number;
+        last_updated: string;
+      }>)
+    : (db
+        .prepare(`
+          SELECT educador_nome, COUNT(*) as total_alunos, MAX(updated_at) as last_updated
+          FROM student_educators
+          WHERE escola_codigo = ?
+          GROUP BY educador_nome
+          ORDER BY total_alunos DESC
+        `)
+        .all(escolaCodigo) as Array<{
+        educador_nome: string;
+        total_alunos: number;
+        last_updated: string;
+      }>);
 
   return rows.map((r) => ({
     educadorNome: r.educador_nome,
@@ -1677,6 +1966,179 @@ export interface MultiSchoolFilter {
   diaSemana?: string;
 }
 
+/**
+ * Calcula um deslocamento numérico determinístico para isolar a chave primária `id`
+ * da tabela `student_records` entre múltiplas escolas no SQLite, impedindo que a Escola B
+ * sobrescreva registros da Escola A mesmo quando ambas enviam IDs locais 1..N.
+ */
+function computeSchoolRecordIdOffset(schoolId: string): number {
+  const clean = String(schoolId || 'school-1875').trim();
+  if (clean === 'school-1875') return 0;
+  let hash = 2166136261;
+  for (let i = 0; i < clean.length; i++) {
+    hash ^= clean.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  const positiveBucket = (Math.abs(hash) % 9000) + 1;
+  return positiveBucket * 100_000;
+}
+
+export interface PortalReconciliationReport<T = Record<string, any>> {
+  reconciledRecords: T[];
+  totalPortal: number;
+  totalStored: number;
+  insertedCount: number;
+  updatedCount: number;
+  preservedPresencesCount: number;
+  divergencesCount: number;
+  divergences: Array<{
+    contrato: string;
+    diaSemana: string;
+    horaInicio: string;
+    type: 'PRESERVED_CONFIRMED_PRESENCE' | 'STATUS_UPDATED' | 'NEW_SLOT';
+    details: string;
+  }>;
+}
+
+/**
+ * Compara e reconcilia os dados recebidos do Portal do Aluno com os registros já armazenados
+ * para a mesma escola (`schoolId`), garantindo idempotência e impedindo que uma falha parcial
+ * apague presenças já confirmadas.
+ */
+function buildRecordSlotKey(rec: Record<string, any>): string {
+  const contrato = String(rec.contrato || '').trim();
+  const diaSemana = String(rec.diaSemana || '').trim();
+  const horaInicio = String(rec.horaInicio || '').trim();
+  const cursoOrAula = String(rec.aulaId || rec.curso || rec.id || '').trim();
+  if (!contrato && !diaSemana && !horaInicio) return '';
+  return `${contrato}|${diaSemana}|${horaInicio}|${cursoOrAula}`;
+}
+
+export function comparePortalWithStoredRecords<T extends Record<string, any>>(
+  portalRecords: T[],
+  storedRecords: T[],
+  schoolId: string = 'school-1875'
+): PortalReconciliationReport<T> {
+  const storedBySlot = new Map<string, T>();
+  const storedByTimeSlot = new Map<string, T>();
+  for (const st of storedRecords) {
+    if (st.schoolId && st.schoolId !== schoolId) continue;
+    const slotKey = buildRecordSlotKey(st);
+    if (slotKey) {
+      storedBySlot.set(slotKey, st);
+    }
+    const timeKey = `${String(st.contrato || '').trim()}|${String(st.diaSemana || '').trim()}|${String(st.horaInicio || '').trim()}`;
+    if (timeKey !== '||' && !storedByTimeSlot.has(timeKey)) {
+      storedByTimeSlot.set(timeKey, st);
+    }
+  }
+
+  const divergences: PortalReconciliationReport<T>['divergences'] = [];
+  const reconciledRecords: T[] = [];
+  let insertedCount = 0;
+  let updatedCount = 0;
+  let preservedPresencesCount = 0;
+
+  const seenSlots = new Set<string>();
+
+  for (const incoming of portalRecords) {
+    const contrato = String(incoming.contrato || '').trim();
+    const diaSemana = String(incoming.diaSemana || '').trim();
+    const horaInicio = String(incoming.horaInicio || '').trim();
+    const slotKey = buildRecordSlotKey(incoming);
+    if (slotKey) {
+      if (seenSlots.has(slotKey)) {
+        // Deduplica registros estritamente idênticos no mesmo lote do portal
+        continue;
+      }
+      seenSlots.add(slotKey);
+    }
+
+    const timeKey = `${contrato}|${diaSemana}|${horaInicio}`;
+    const existing =
+      (slotKey ? storedBySlot.get(slotKey) : undefined) ||
+      (timeKey !== '||' && portalRecords.length <= storedRecords.length
+        ? storedByTimeSlot.get(timeKey)
+        : undefined);
+    if (!existing) {
+      insertedCount++;
+      reconciledRecords.push({
+        ...incoming,
+        schoolId,
+      });
+      continue;
+    }
+
+    const existingHasConfirmedPresence =
+      existing.presencaOuFalta === 'P' ||
+      existing.presencaOuFalta === 'Presença' ||
+      existing.infoAula === 'Sistema Acadêmico' ||
+      Boolean(existing.inicio) ||
+      Boolean(existing.fim);
+
+    const incomingHasPresenceOrAbsence =
+      incoming.presencaOuFalta === 'P' ||
+      incoming.presencaOuFalta === 'Presença' ||
+      incoming.presencaOuFalta === 'F' ||
+      incoming.presencaOuFalta === 'Falta' ||
+      Boolean(incoming.inicio) ||
+      Boolean(incoming.fim);
+
+    if (existingHasConfirmedPresence && !incomingHasPresenceOrAbsence) {
+      // Preserva a presença já confirmada caso o portal retorne resposta parcial/vazia
+      preservedPresencesCount++;
+      divergences.push({
+        contrato,
+        diaSemana,
+        horaInicio,
+        type: 'PRESERVED_CONFIRMED_PRESENCE',
+        details: `Presença confirmada preservada para contrato ${contrato} em ${diaSemana} ${horaInicio}.`,
+      });
+      reconciledRecords.push({
+        ...incoming,
+        presencaOuFalta: existing.presencaOuFalta || 'Presença',
+        inicio: existing.inicio || incoming.inicio,
+        fim: existing.fim || incoming.fim,
+        infoAula: existing.infoAula || incoming.infoAula,
+        status: existing.status || 'FINALIZADO',
+        educador: incoming.educador || existing.educador,
+        educadorCachedAt: incoming.educadorCachedAt || existing.educadorCachedAt,
+        schoolId,
+      });
+      continue;
+    }
+
+    if (existing.presencaOuFalta !== incoming.presencaOuFalta) {
+      updatedCount++;
+      divergences.push({
+        contrato,
+        diaSemana,
+        horaInicio,
+        type: 'STATUS_UPDATED',
+        details: `Status alterado de "${existing.presencaOuFalta || 'vazio'}" para "${incoming.presencaOuFalta || 'vazio'}" no contrato ${contrato}.`,
+      });
+    }
+
+    reconciledRecords.push({
+      ...incoming,
+      educador: incoming.educador || existing.educador,
+      educadorCachedAt: incoming.educadorCachedAt || existing.educadorCachedAt,
+      schoolId,
+    });
+  }
+
+  return {
+    reconciledRecords,
+    totalPortal: portalRecords.length,
+    totalStored: storedRecords.length,
+    insertedCount,
+    updatedCount,
+    preservedPresencesCount,
+    divergencesCount: divergences.length,
+    divergences,
+  };
+}
+
 export function upsertStudentRecordsInDb<T extends Record<string, any>>(
   records: T[],
   schoolId: string = 'school-1875',
@@ -1686,7 +2148,11 @@ export function upsertStudentRecordsInDb<T extends Record<string, any>>(
 ): void {
   if (!records || records.length === 0) return;
   const db = getDatabase();
+  const cleanSchoolId = String(schoolId || 'school-1875').trim();
+  const cleanCodigo = String(escolaCodigo || '1875').trim();
+  const idOffset = computeSchoolRecordIdOffset(cleanSchoolId);
   const now = new Date().toISOString();
+
   const stmt = db.prepare(`
     INSERT INTO student_records (
       id, contrato, school_id, escola_codigo, unidade, dia_semana, educador, payload_json, updated_at
@@ -1704,13 +2170,33 @@ export function upsertStudentRecordsInDb<T extends Record<string, any>>(
 
   db.exec('BEGIN TRANSACTION;');
   try {
-    const educatorsMap = getStudentEducatorsMap(escolaCodigo);
-    if (replaceForSchool) {
-      db.prepare('DELETE FROM student_records WHERE school_id = ?').run(schoolId);
+    const educatorsMap = getStudentEducatorsMap(cleanCodigo, cleanSchoolId);
+    const existingRecords = getStudentRecordsFromDb<Record<string, any>>({
+      schoolId: cleanSchoolId,
+    });
+    const { reconciledRecords } = comparePortalWithStoredRecords(
+      records,
+      existingRecords,
+      cleanSchoolId
+    );
+
+    const finalRecords: Record<string, any>[] = [...reconciledRecords];
+    if (!replaceForSchool && existingRecords.length > 0 && records.length < existingRecords.length) {
+      const incomingSlotKeys = new Set(reconciledRecords.map((r) => buildRecordSlotKey(r)));
+      for (const oldRec of existingRecords) {
+        const key = buildRecordSlotKey(oldRec);
+        if (key && !incomingSlotKeys.has(key)) {
+          finalRecords.push(oldRec);
+        }
+      }
     }
-    for (let i = 0; i < records.length; i++) {
-      const r = records[i];
-      const recId = Number(r.id || i + 1);
+
+    db.prepare('DELETE FROM student_records WHERE school_id = ?').run(cleanSchoolId);
+
+    for (let i = 0; i < finalRecords.length; i++) {
+      const r = finalRecords[i];
+      const baseId = i + 1;
+      const scopedDbId = idOffset > 0 ? idOffset + baseId : baseId;
       const contrato = String(r.contrato || '').trim();
       const diaSemana = String(r.diaSemana || '').trim();
       const cachedEd = contrato ? educatorsMap.get(contrato) : undefined;
@@ -1718,18 +2204,18 @@ export function upsertStudentRecordsInDb<T extends Record<string, any>>(
       const recUnidade = String(r.unidade || unidade).trim();
       const payload = JSON.stringify({
         ...r,
-        id: recId,
+        id: baseId,
         educador: educador || undefined,
         educadorCachedAt: r.educadorCachedAt || cachedEd?.updatedAt || undefined,
         unidade: recUnidade,
-        schoolId,
-        escolaCodigo,
+        schoolId: cleanSchoolId,
+        escolaCodigo: cleanCodigo,
       });
       stmt.run(
-        recId,
+        scopedDbId,
         contrato,
-        schoolId,
-        escolaCodigo,
+        cleanSchoolId,
+        cleanCodigo,
         recUnidade,
         diaSemana,
         educador,
@@ -1774,10 +2260,13 @@ export function getStudentRecordsFromDb<T = any>(
 
   const whereSql = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
   const rows = db
-    .prepare(`SELECT payload_json, educador FROM student_records ${whereSql} ORDER BY id ASC`)
-    .all(...params) as Array<{ payload_json: string; educador: string }>;
+    .prepare(`SELECT payload_json, educador, school_id FROM student_records ${whereSql} ORDER BY id ASC`)
+    .all(...params) as Array<{ payload_json: string; educador: string; school_id: string }>;
 
-  const educatorsMap = getStudentEducatorsMap(filter?.codigoPortal || '1875');
+  const educatorsMap = getStudentEducatorsMap(
+    filter?.codigoPortal || '1875',
+    filter?.schoolId
+  );
   const results: T[] = [];
   for (const row of rows) {
     try {
@@ -1820,6 +2309,8 @@ export function upsertNpsRecordsInDb<T extends Record<string, any>>(
 ): void {
   if (!invitations) return;
   const db = getDatabase();
+  const cleanSchoolId = String(schoolId || 'school-1875').trim();
+  const cleanCodigo = String(escolaCodigo || '1875').trim();
   const now = new Date().toISOString();
   const stmt = db.prepare(`
     INSERT INTO nps_records (
@@ -1838,23 +2329,27 @@ export function upsertNpsRecordsInDb<T extends Record<string, any>>(
   db.exec('BEGIN TRANSACTION;');
   try {
     if (replaceForSchool) {
-      db.prepare('DELETE FROM nps_records WHERE school_id = ?').run(schoolId);
+      db.prepare('DELETE FROM nps_records WHERE school_id = ?').run(cleanSchoolId);
     }
     for (let i = 0; i < invitations.length; i++) {
       const inv = invitations[i];
-      const invId = String(inv.id || inv.controlId || `nps-${i + 1}`).trim();
-      const controlId = String(inv.controlId || invId).trim();
+      const rawInvId = String(inv.id || inv.controlId || `nps-${i + 1}`).trim();
+      const storagePk =
+        cleanSchoolId === 'school-1875' || rawInvId.startsWith(`${cleanSchoolId}:`)
+          ? rawInvId
+          : `${cleanSchoolId}:${rawInvId}`;
+      const controlId = String(inv.controlId || rawInvId).trim();
       const contrato = String(inv.contrato || '').trim();
       const payload = JSON.stringify({
         ...inv,
-        id: invId,
+        id: rawInvId,
         controlId,
         surveyUrl: '',
-        schoolId,
-        escolaCodigo,
+        schoolId: cleanSchoolId,
+        escolaCodigo: cleanCodigo,
         unidade,
       });
-      stmt.run(invId, controlId, contrato, schoolId, escolaCodigo, unidade, payload, now);
+      stmt.run(storagePk, controlId, contrato, cleanSchoolId, cleanCodigo, unidade, payload, now);
     }
     db.exec('COMMIT;');
   } catch (err) {

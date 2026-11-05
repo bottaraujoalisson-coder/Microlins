@@ -81,6 +81,7 @@ import { LoginView } from './components/LoginView';
 import { AdminPanelView } from './components/AdminPanelView';
 import { PortalAlunoHubView } from './components/PortalAlunoHubView';
 import { PrivacyProtectionView } from './components/PrivacyProtectionView';
+import { IndicatorHelpPopover } from './components/IndicatorHelpPopover';
 
 const AUTO_SYNC_INTERVAL_MS = 60_000;
 const FILTER_LOADING_DELAY_MS = 110;
@@ -233,11 +234,28 @@ export default function App() {
   const [enteredSchoolFromAdmin, setEnteredSchoolFromAdmin] =
     useState<boolean>(false);
 
-  // Carregamento assíncrono e atualização em segundo plano via Supabase (com timeout de segurança para nunca travar a aplicação)
+  // Carregamento assíncrono e atualização em segundo plano via Supabase quando em ambiente Serverless/SPA (ex.: Netlify)
   useEffect(() => {
     let isMounted = true;
-    async function loadSupabaseData() {
+    let realtimeChannel: ReturnType<typeof supabase.channel> | null = null;
+
+    async function loadSupabaseDataIfNeeded() {
       try {
+        // Verifica primeiro se o servidor Node/Express (/api/*) está ativo.
+        // Quando o backend Node está ativo, ele próprio gerencia SQLite + Portal + Supabase sem ruído de rede no navegador.
+        const apiCheck = await fetch('/api/microlins/status', {
+          headers: { Accept: 'application/json' },
+        }).catch(() => null);
+        const contentType = apiCheck?.headers.get('content-type') || '';
+        const hasNodeBackend = Boolean(
+          apiCheck && apiCheck.ok && contentType.includes('application/json')
+        );
+
+        if (hasNodeBackend) {
+          if (isMounted) setIsLoadingData(false);
+          return;
+        }
+
         const timeoutPromise = new Promise<null>((resolve) =>
           setTimeout(() => resolve(null), 4000)
         );
@@ -265,6 +283,57 @@ export default function App() {
             setSchoolsRegistry(remoteSchools);
           }
         }
+
+        if (isMounted) {
+          realtimeChannel = supabase
+            .channel('microlins-realtime-sync')
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'student_records' },
+              async () => {
+                const updatedRecords = await fetchStudentRecords();
+                if (updatedRecords && updatedRecords.length > 0) {
+                  setRecords(updatedRecords);
+                }
+              }
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'nps_records' },
+              async () => {
+                const updatedNps = await fetchNpsInvitations();
+                if (updatedNps && updatedNps.length > 0) {
+                  setActiveNpsInvitations(
+                    filterAndDeduplicateAnnualNpsInvitations(
+                      updatedNps,
+                      getCurrentBrasiliaYear()
+                    )
+                  );
+                }
+              }
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'schools' },
+              async () => {
+                const updatedSchools = await fetchSchoolsFromSupabase();
+                if (updatedSchools && updatedSchools.length > 0) {
+                  setSchoolsRegistry(updatedSchools);
+                }
+              }
+            )
+            .on(
+              'postgres_changes',
+              { event: '*', schema: 'public', table: 'users' },
+              async () => {
+                const updatedSchools = await fetchSchoolsFromSupabase();
+                if (updatedSchools && updatedSchools.length > 0) {
+                  setSchoolsRegistry(updatedSchools);
+                }
+              }
+            )
+            .subscribe();
+        }
       } catch (err) {
         console.error('Error loading data from Supabase:', err);
       } finally {
@@ -273,62 +342,13 @@ export default function App() {
         }
       }
     }
-    loadSupabaseData();
+
+    loadSupabaseDataIfNeeded();
     return () => {
       isMounted = false;
-    };
-  }, []);
-
-  // Supabase Realtime Subscription (Sincronização automática em tempo real via WebSockets)
-  useEffect(() => {
-    const channel = supabase
-      .channel('microlins-realtime-sync')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'student_records' },
-        async () => {
-          const remoteRecords = await fetchStudentRecords();
-          if (remoteRecords && remoteRecords.length > 0) {
-            setRecords(remoteRecords);
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'nps_records' },
-        async () => {
-          const remoteNps = await fetchNpsInvitations();
-          if (remoteNps && remoteNps.length > 0) {
-            setActiveNpsInvitations(
-              filterAndDeduplicateAnnualNpsInvitations(remoteNps, getCurrentBrasiliaYear())
-            );
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'schools' },
-        async () => {
-          const remoteSchools = await fetchSchoolsFromSupabase();
-          if (remoteSchools && remoteSchools.length > 0) {
-            setSchoolsRegistry(remoteSchools);
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'users' },
-        async () => {
-          const remoteSchools = await fetchSchoolsFromSupabase();
-          if (remoteSchools && remoteSchools.length > 0) {
-            setSchoolsRegistry(remoteSchools);
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
+      if (realtimeChannel) {
+        supabase.removeChannel(realtimeChannel);
+      }
     };
   }, []);
 
@@ -525,6 +545,7 @@ export default function App() {
     resolveDefaultWeekdayFilter()
   );
   const [selectedSala, setSelectedSala] = useState<string>('TODAS');
+  const [selectedEducador, setSelectedEducador] = useState<string>('TODOS');
   const [selectedHorario, setSelectedHorario] = useState<string>('TODOS');
   const [selectedModalidade, setSelectedModalidade] = useState<
     'TODAS' | ModalityType
@@ -760,6 +781,17 @@ export default function App() {
     return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [dayFilteredRecords]);
 
+  const educadorOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of dayFilteredRecords) {
+      const prof = (r.professor || '').trim();
+      if (prof && prof !== 'Não informado' && prof !== 'S/D') {
+        set.add(prof);
+      }
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [dayFilteredRecords]);
+
   const horarioOptions = useMemo(() => {
     const hourNumbers = new Set<number>();
     for (const r of dayFilteredRecords) {
@@ -780,6 +812,7 @@ export default function App() {
           search: '',
           diaSemana: selectedDiaSemana,
           sala: selectedSala,
+          professor: selectedEducador,
           horario: selectedHorario,
           modalidade: selectedModalidade,
           apostilaFilter: selectedApostila,
@@ -805,6 +838,7 @@ export default function App() {
       allEvaluatedRecords,
       selectedDiaSemana,
       selectedSala,
+      selectedEducador,
       selectedHorario,
       selectedModalidade,
       selectedApostila,
@@ -1052,6 +1086,7 @@ export default function App() {
   const hasActiveStudentFilters =
     selectedDiaSemana !== resolveDefaultWeekdayFilter() ||
     selectedSala !== 'TODAS' ||
+    selectedEducador !== 'TODOS' ||
     selectedHorario !== 'TODOS' ||
     selectedModalidade !== 'TODAS' ||
     selectedApostila !== 'TODAS' ||
@@ -1065,6 +1100,7 @@ export default function App() {
     triggerWithLoading(() => {
       setSelectedDiaSemana(resolveDefaultWeekdayFilter());
       setSelectedSala('TODAS');
+      setSelectedEducador('TODOS');
       setSelectedHorario('TODOS');
       setSelectedModalidade('TODAS');
       setSelectedApostila('TODAS');
@@ -1466,8 +1502,8 @@ export default function App() {
                     </select>
                   </div>
 
-                  {/* Linha 1 - Col 3 e 4: Sala */}
-                  <div className="sm:col-span-2">
+                  {/* Linha 1 - Col 3: Sala */}
+                  <div>
                     <label htmlFor="filter-sala" className="sr-only">
                       Sala
                     </label>
@@ -1490,6 +1526,37 @@ export default function App() {
                       {salaOptions.map((sala) => (
                         <option key={sala} value={sala}>
                           Sala: {sala}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Linha 1 - Col 4: Educador (Seção 10.1) */}
+                  <div className="relative">
+                    <label htmlFor="filter-educador" className="sr-only">
+                      Educador
+                    </label>
+                    <UserCheck className="pointer-events-none absolute left-2 top-2 h-3 w-3 text-[#004A8D] dark:text-sky-400" />
+                    <select
+                      id="filter-educador"
+                      data-testid="kanban-educador-filter"
+                      aria-label="Educador"
+                      value={selectedEducador}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        triggerWithLoading(
+                          () => setSelectedEducador(val),
+                          'Filtrando alunos por educador...'
+                        );
+                      }}
+                      className="typo-control h-7 w-full rounded-md border border-slate-200 bg-slate-50/70 pl-6 pr-2 text-slate-800 transition-colors hover:border-slate-300 focus:border-[#004A8D] focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:bg-slate-800"
+                    >
+                      <option value="TODOS">
+                        Educador: Todos ({educadorOptions.length})
+                      </option>
+                      {educadorOptions.map((prof) => (
+                        <option key={prof} value={prof}>
+                          Educador: {prof}
                         </option>
                       ))}
                     </select>
@@ -1827,17 +1894,24 @@ export default function App() {
               className="shrink-0 border-b border-slate-200/80 bg-slate-50/95 px-3 py-1.5 transition-colors sm:px-5 dark:border-slate-800 dark:bg-slate-900/80"
             >
               {activeTab === 'KANBAN_ALUNOS' ? (
-                /* 6 Cards organizados em 2 linhas de 3 cards (grid-cols-3) */
+                /* 6 Cards organizados em 2 linhas de 3 cards (grid-cols-3) com ícone (?) explicativo */
                 <div
                   data-testid="student-summary-cards-grid"
                   className="grid grid-cols-3 gap-1.5"
                 >
                   {/* Linha 1 - Card 1: Presenças */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => toggleStatusFilter('Presença')}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleStatusFilter('Presença');
+                      }
+                    }}
                     aria-pressed={statusFilter === 'Presença'}
-                    className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
+                    className={`flex h-8 cursor-pointer items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       statusFilter === 'Presença'
                         ? 'border-emerald-500 bg-emerald-50/90 ring-1 ring-emerald-500/25 dark:border-emerald-500 dark:bg-emerald-950/60'
                         : 'border-slate-200/90 bg-white hover:border-emerald-300 hover:bg-emerald-50/40 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-emerald-700'
@@ -1848,18 +1922,26 @@ export default function App() {
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
                         Presenças
                       </span>
+                      <IndicatorHelpPopover indicatorId="kanban_presencas" />
                     </div>
                     <span className="typo-title-section ml-2 text-emerald-700 tabular-nums dark:text-emerald-400">
                       {kpis.presencaCount}
                     </span>
-                  </button>
+                  </div>
 
                   {/* Linha 1 - Card 2: Faltas */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => toggleStatusFilter('Falta')}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleStatusFilter('Falta');
+                      }
+                    }}
                     aria-pressed={statusFilter === 'Falta'}
-                    className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
+                    className={`flex h-8 cursor-pointer items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       statusFilter === 'Falta'
                         ? 'border-rose-500 bg-rose-50/90 ring-1 ring-rose-500/25 dark:border-rose-500 dark:bg-rose-950/60'
                         : 'border-slate-200/90 bg-white hover:border-rose-300 hover:bg-rose-50/40 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-rose-700'
@@ -1870,18 +1952,26 @@ export default function App() {
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
                         Faltas
                       </span>
+                      <IndicatorHelpPopover indicatorId="kanban_faltas" />
                     </div>
                     <span className="typo-title-section ml-2 text-rose-700 tabular-nums dark:text-rose-400">
                       {kpis.faltaCount}
                     </span>
-                  </button>
+                  </div>
 
                   {/* Linha 1 - Card 3: Não iniciada */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => toggleStatusFilter('Não iniciada')}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleStatusFilter('Não iniciada');
+                      }
+                    }}
                     aria-pressed={isNotStartedAttendanceStatus(statusFilter)}
-                    className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
+                    className={`flex h-8 cursor-pointer items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       isNotStartedAttendanceStatus(statusFilter)
                         ? 'border-slate-400 bg-slate-100 ring-1 ring-slate-400/25 dark:border-slate-600 dark:bg-slate-800'
                         : 'border-slate-200/90 bg-white hover:border-slate-300 hover:bg-slate-50 dark:border-slate-800 dark:bg-slate-900 dark:hover:border-slate-700'
@@ -1892,11 +1982,12 @@ export default function App() {
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
                         Não iniciada
                       </span>
+                      <IndicatorHelpPopover indicatorId="kanban_nao_iniciada" align="right" />
                     </div>
                     <span className="typo-title-section ml-2 text-slate-700 tabular-nums dark:text-slate-200">
                       {kpis.aguardandoCount}
                     </span>
-                  </button>
+                  </div>
 
                   {/* Linha 2 - Card 4: Frequência Geral */}
                   <div
@@ -1930,6 +2021,7 @@ export default function App() {
                       >
                         Frequência
                       </span>
+                      <IndicatorHelpPopover indicatorId="kanban_frequencia" />
                     </div>
                     <span
                       className={`typo-title-section ml-2 whitespace-nowrap tabular-nums ${
@@ -1956,6 +2048,7 @@ export default function App() {
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
                         Agendamentos
                       </span>
+                      <IndicatorHelpPopover indicatorId="kanban_agendamentos" />
                     </div>
                     <span className="typo-title-section ml-2 text-slate-800 tabular-nums dark:text-slate-100">
                       {kpis.totalAgendamentos}
@@ -1963,12 +2056,19 @@ export default function App() {
                   </div>
 
                   {/* Linha 2 - Card 6: Evasão */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     data-testid="kpi-evasao"
                     onClick={() => toggleStatusFilter('EVASAO')}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        toggleStatusFilter('EVASAO');
+                      }
+                    }}
                     aria-pressed={statusFilter === 'EVASAO'}
-                    className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
+                    className={`flex h-8 cursor-pointer items-center justify-between rounded-md border px-2.5 text-left transition-all duration-150 ${
                       statusFilter === 'EVASAO'
                         ? 'border-rose-500 bg-rose-100/80 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/60'
                         : kpis.evasaoCount > 0
@@ -1993,6 +2093,7 @@ export default function App() {
                       >
                         Evasão
                       </span>
+                      <IndicatorHelpPopover indicatorId="kanban_evasao" align="right" />
                     </div>
                     <span
                       className={`typo-title-section ml-2 tabular-nums ${
@@ -2003,26 +2104,34 @@ export default function App() {
                     >
                       {kpis.evasaoCount}
                     </span>
-                  </button>
+                  </div>
                 </div>
               ) : (
-                /* 5 Cards do Kanban NPS (sem o card Ciclo do NPS, com Status de envio expandido e claro) */
+                /* 5 Cards do Kanban NPS com ícone (?) explicativo */
                 <div
                   data-testid="nps-summary-cards-grid"
                   className="grid grid-cols-2 gap-1.5 sm:grid-cols-3"
                 >
                   {/* Linha 1 - Card 1: Total de Convites */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     data-testid="nps-kpi-total-convites"
                     onClick={handleResetNpsFilters}
-                    className="flex h-8 items-center justify-between rounded-md border border-[#004A8D]/30 bg-sky-50/75 px-2.5 text-left transition-colors hover:bg-sky-50 dark:border-sky-800 dark:bg-sky-950/50"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleResetNpsFilters();
+                      }
+                    }}
+                    className="flex h-8 cursor-pointer items-center justify-between rounded-md border border-[#004A8D]/30 bg-sky-50/75 px-2.5 text-left transition-colors hover:bg-sky-50 dark:border-sky-800 dark:bg-sky-950/50"
                   >
                     <div className="flex min-w-0 items-center gap-1.5">
                       <Sparkles className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
                       <span className="typo-subtitle truncate text-slate-900 whitespace-nowrap dark:text-sky-100">
                         {npsDiaSemana !== 'TODOS' ? 'Convites no dia' : 'Total de convites'}
                       </span>
+                      <IndicatorHelpPopover indicatorId="nps_total_convites" />
                     </div>
                     <div className="flex items-baseline gap-1">
                       <span className="typo-title-section text-[#004A8D] tabular-nums dark:text-sky-300">
@@ -2034,11 +2143,12 @@ export default function App() {
                         </span>
                       )}
                     </div>
-                  </button>
+                  </div>
 
                   {/* Linha 1 - Card 2: Convites pelo Portal */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     data-testid="nps-kpi-portal"
                     onClick={() =>
                       triggerWithLoading(() => {
@@ -2047,8 +2157,16 @@ export default function App() {
                         );
                       }, 'Filtrando convites pelo Portal do Aluno...')
                     }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setNpsOrigem((prev) =>
+                          prev === 'Portal do Aluno' ? 'TODAS' : 'Portal do Aluno'
+                        );
+                      }
+                    }}
                     aria-pressed={npsOrigem === 'Portal do Aluno'}
-                    className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-colors ${
+                    className={`flex h-8 cursor-pointer items-center justify-between rounded-md border px-2.5 text-left transition-colors ${
                       npsOrigem === 'Portal do Aluno'
                         ? 'border-sky-500 bg-sky-50/90 ring-1 ring-sky-500/25 dark:border-sky-500 dark:bg-sky-950/60'
                         : 'border-slate-200/90 bg-white hover:border-sky-300 hover:bg-sky-50/35 dark:border-slate-800 dark:bg-slate-900'
@@ -2059,15 +2177,17 @@ export default function App() {
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
                         Portal do Aluno
                       </span>
+                      <IndicatorHelpPopover indicatorId="nps_portal_aluno" />
                     </div>
                     <span className="typo-title-section ml-2 text-sky-700 tabular-nums dark:text-sky-400">
                       {npsKPIs.portalDoAlunoCount}
                     </span>
-                  </button>
+                  </div>
 
                   {/* Linha 1 - Card 3: Convites por E-mail */}
-                  <button
-                    type="button"
+                  <div
+                    role="button"
+                    tabIndex={0}
                     data-testid="nps-kpi-email"
                     onClick={() =>
                       triggerWithLoading(() => {
@@ -2076,8 +2196,16 @@ export default function App() {
                         );
                       }, 'Filtrando convites por E-mail...')
                     }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setNpsOrigem((prev) =>
+                          prev === 'E-mail' ? 'TODAS' : 'E-mail'
+                        );
+                      }
+                    }}
                     aria-pressed={npsOrigem === 'E-mail'}
-                    className={`flex h-8 items-center justify-between rounded-md border px-2.5 text-left transition-colors ${
+                    className={`flex h-8 cursor-pointer items-center justify-between rounded-md border px-2.5 text-left transition-colors ${
                       npsOrigem === 'E-mail'
                         ? 'border-indigo-500 bg-indigo-50/90 ring-1 ring-indigo-500/25 dark:border-indigo-500 dark:bg-indigo-950/60'
                         : 'border-slate-200/90 bg-white hover:border-indigo-300 hover:bg-indigo-50/35 dark:border-slate-800 dark:bg-slate-900'
@@ -2088,20 +2216,24 @@ export default function App() {
                       <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
                         Por E-mail
                       </span>
+                      <IndicatorHelpPopover indicatorId="nps_por_email" align="right" />
                     </div>
                     <span className="typo-title-section ml-2 text-indigo-700 tabular-nums dark:text-indigo-400">
                       {npsKPIs.emailCount}
                     </span>
-                  </button>
+                  </div>
 
                   {/* Linha 2 - Card 4: Destinatário (Aluno vs Responsável) */}
                   <div
                     data-testid="nps-kpi-destinatarios"
                     className="flex h-8 items-center justify-between rounded-md border border-slate-200/90 bg-white px-2.5 dark:border-slate-800 dark:bg-slate-900"
                   >
-                    <span className="typo-subtitle truncate text-slate-700 dark:text-slate-200">
-                      Destinatário
-                    </span>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="typo-subtitle truncate text-slate-700 dark:text-slate-200">
+                        Destinatário
+                      </span>
+                      <IndicatorHelpPopover indicatorId="nps_destinatario" />
+                    </div>
                     <div className="flex items-center gap-1 tabular-nums">
                       <button
                         type="button"
@@ -2149,9 +2281,12 @@ export default function App() {
                     data-testid="nps-kpi-real-delivery"
                     className="col-span-2 flex h-8 items-center justify-between gap-2 rounded-md border border-slate-200/90 bg-white px-2.5 sm:col-span-2 dark:border-slate-800 dark:bg-slate-900"
                   >
-                    <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
-                      Status de envio
-                    </span>
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="typo-subtitle truncate text-slate-700 whitespace-nowrap dark:text-slate-200">
+                        Status de envio
+                      </span>
+                      <IndicatorHelpPopover indicatorId="nps_status_envio" align="right" />
+                    </div>
                     <div className="flex flex-wrap items-center gap-1 tabular-nums">
                       <button
                         type="button"
@@ -2299,37 +2434,45 @@ export default function App() {
         </>
       )}
 
-      {/* REGIÃO 5: RODAPÉ MINIMALISTA E COMPACTO DE LINHA ÚNICA */}
-      <footer className="shrink-0 border-t border-[#001B3A] bg-[#002855] px-3 py-1 text-[11px] text-slate-300 sm:px-5 dark:border-slate-800 dark:bg-slate-950">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
+      {/* REGIÃO 5: RODAPÉ MINIMALISTA E COMPACTO DE LINHA ÚNICA (Seção 14) */}
+      <footer
+        data-testid="system-footer"
+        className="shrink-0 border-t border-[#001B3A] bg-[#002855] px-3 py-1.5 text-[11px] text-slate-300 sm:px-5 dark:border-slate-800 dark:bg-slate-950"
+      >
+        <div className="mx-auto flex w-full max-w-7xl flex-col items-center justify-between gap-1.5 sm:flex-row">
+          <div className="flex flex-wrap items-center justify-center gap-2">
             <span className="font-medium text-white">
               © 2026 Grupo Realizar Microlins
             </span>
-            <span className="text-white/25">·</span>
+            <span aria-hidden="true" className="text-white/25">
+              ·
+            </span>
             <button
               type="button"
               data-testid="footer-privacy-link"
               onClick={() => setShowPrivacyPage(true)}
-              className="inline-flex items-center gap-1 font-medium text-sky-200 transition-colors hover:text-white"
+              className="inline-flex items-center gap-1 font-medium text-sky-200 transition-colors hover:text-white cursor-pointer"
             >
               <ShieldCheck className="h-3 w-3 text-emerald-400" />
               <span>Privacidade e LGPD</span>
             </button>
           </div>
 
-          <span className="hidden text-sky-200/90 sm:inline">
+          <span className="text-center font-medium text-sky-200/90">
             Desenvolvido por Alisson Araújo Bott
           </span>
 
-          <div className="inline-flex items-center gap-1.5 text-slate-200">
+          <div className="inline-flex items-center justify-center gap-1.5 text-slate-200">
             <MessageSquare className="h-3 w-3 shrink-0 text-emerald-400" />
             <span>Suporte:</span>
             <a
-              href="https://wa.me/5518997432487"
+              data-testid="footer-whatsapp-support-link"
+              href={`https://api.whatsapp.com/send?phone=5518997432487&text=${encodeURIComponent(
+                `Olá! Preciso de suporte no sistema. Escola: ${activeSchoolName} | Usuário: ${activeUserFullName}`
+              )}`}
               target="_blank"
               rel="noopener noreferrer"
-              className="font-semibold text-white hover:text-sky-200"
+              className="font-semibold text-white underline-offset-2 transition-colors hover:text-emerald-300 hover:underline"
             >
               (18) 99743-2487
             </a>

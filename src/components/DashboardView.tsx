@@ -67,6 +67,8 @@ import {
   toggleDashboardCardSelection,
 } from '../utils/performanceAnalytics';
 
+import { IndicatorHelpPopover } from './IndicatorHelpPopover';
+
 interface DashboardViewProps {
   allEvaluatedRecords: EvaluatedStudentRecord[];
   onSelectStudentRecord: (recordId: number) => void;
@@ -97,6 +99,7 @@ const DEFAULT_DASHBOARD_FILTERS: DashboardFilterCriteria = {
   nomeFilter: '',
   contratoFilter: '',
   formacao: 'TODAS',
+  educador: 'TODOS',
   capacitacao: 'TODAS',
   turno: 'TODOS',
   sala: 'TODAS',
@@ -114,6 +117,7 @@ const COLUMN_TEST_ID_SUFFIX: Record<ConsolidatedColumnId, string> = {
   nomeCompleto: 'nome-aluno',
   contrato: 'contrato',
   formacao: 'capacitacao',
+  educador: 'educador',
   cadNome: 'cad',
   unidade: 'unidade',
   municipio: 'municipio',
@@ -210,6 +214,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
       const salasSet = new Set<string>();
       const modulosSet = new Set<string>();
       const formacoesSet = new Set<string>();
+      const educadoresSet = new Set<string>();
       const turnosSet = new Set<string>();
 
       for (const r of allEvaluatedRecords) {
@@ -219,6 +224,10 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
         if (mod) modulosSet.add(mod);
         const form = formatFormacaoDisplay(r.formacao);
         if (form) formacoesSet.add(form);
+        const ed = (r.educador || r.professor || '').trim();
+        if (ed && ed !== 'A definir' && ed !== 'Não informado') {
+          educadoresSet.add(ed);
+        }
         if (r.turno) turnosSet.add(r.turno);
       }
 
@@ -231,6 +240,9 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
           a.localeCompare(b, 'pt-BR')
         ),
         formacoes: Array.from(formacoesSet).sort((a, b) =>
+          a.localeCompare(b, 'pt-BR')
+        ),
+        educadores: Array.from(educadoresSet).sort((a, b) =>
           a.localeCompare(b, 'pt-BR')
         ),
         turnos: Array.from(turnosSet),
@@ -335,6 +347,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
         (filters.nomeFilter && filters.nomeFilter.trim() !== '') ||
         (filters.contratoFilter && filters.contratoFilter.trim() !== '') ||
         (filters.formacao && filters.formacao !== 'TODAS') ||
+        (filters.educador && filters.educador !== 'TODOS') ||
         (filters.capacitacao && filters.capacitacao !== 'TODAS') ||
         (filters.turno && filters.turno !== 'TODOS') ||
         (filters.sala && filters.sala !== 'TODAS') ||
@@ -588,6 +601,17 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
           return (
             <span className="font-sans text-xs leading-4 font-normal text-slate-700 dark:text-slate-200">
               {st.cursos.join(' · ')}
+            </span>
+          );
+
+        case 'educador':
+          return st.educador && st.educador !== 'Sem vínculo válido' ? (
+            <span className="font-sans text-xs leading-4 font-normal text-slate-700 dark:text-slate-200">
+              {st.educador}
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded border border-amber-200 bg-amber-50 px-2 py-0.5 font-sans text-xs leading-4 font-normal text-amber-800 dark:border-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+              Sem vínculo válido
             </span>
           );
 
@@ -1162,6 +1186,31 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
           );
           break;
 
+        case 'educador':
+          primaryControl = (
+            <select
+              aria-label="Filtrar por Educador"
+              data-testid="col-filter-educador"
+              value={filters.educador || 'TODOS'}
+              onChange={(e) =>
+                setFilters((prev) => ({
+                  ...prev,
+                  educador: e.target.value,
+                }))
+              }
+              className="h-6 min-w-0 flex-1 rounded border border-slate-300 bg-white px-1.5 font-sans text-xs font-normal text-slate-800 focus:border-[#004A8D] focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+            >
+              <option value="TODOS">Todos ({filterOptions.educadores.length})</option>
+              {filterOptions.educadores.map((ed) => (
+                <option key={ed} value={ed}>
+                  {ed}
+                </option>
+              ))}
+              <option value="Sem vínculo válido">Sem vínculo válido</option>
+            </select>
+          );
+          break;
+
         case 'aulaAtual':
           primaryControl = (
             <div className="flex min-w-0 flex-1 items-center gap-1">
@@ -1477,13 +1526,13 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
         data-testid="dashboard-view-container"
         className="flex h-full w-full flex-col gap-1.5 overflow-y-auto pr-0.5 pb-1"
       >
-        {/* SEÇÃO 1: CARDS DE RESUMO DO CONSOLIDADO */}
+        {/* SEÇÃO 1: CARDS DE RESUMO DO CONSOLIDADO (ORGANIZADOS EM 2 LINHAS DE 3 CARDS) */}
         <section
           aria-label="Indicadores de resumo do Consolidado"
           data-testid="dashboard-kpi-cards-grid"
-          className="grid shrink-0 grid-cols-2 gap-1.5 lg:grid-cols-4"
+          className="grid shrink-0 grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-3"
         >
-          {/* CARD 1: FORMAÇÕES ATIVAS */}
+          {/* LINHA 1, CARD 1: FORMAÇÕES ATIVAS */}
           <div
             data-testid="dash-card-total-alunos"
             onClick={() => handleToggleCard('TOTAL_ALUNOS')}
@@ -1497,6 +1546,10 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
               <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
                 <GraduationCap className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
                 <span>Formações ativas</span>
+                <IndicatorHelpPopover
+                  indicatorId="CONSOLIDADO_FORMACOES_ATIVAS"
+                  align="left"
+                />
               </span>
               <span className="text-sm font-black text-[#004A8D] tabular-nums whitespace-nowrap dark:text-sky-400">
                 {metrics.formacoesAtivasCount}
@@ -1556,35 +1609,79 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             </div>
           </div>
 
-          {/* CARD 2: ALUNOS ATIVOS (ÚNICOS, UNIFICANDO CONTRATOS) */}
+          {/* LINHA 1, CARD 2 (UNIFICADO): ALUNOS ATIVOS & POSSÍVEIS DESISTÊNCIAS */}
           <div
-            data-testid="dash-card-alunos-ativos"
-            onClick={() => handleToggleCard('ALUNOS_ATIVOS_UNICOS')}
-            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-left transition-all ${
-              isAlunosAtivosUnicosActive
-                ? 'border-[#004A8D] bg-sky-50/80 ring-1 ring-[#004A8D]/25 dark:border-sky-500 dark:bg-sky-950/40'
-                : 'border-slate-200/90 bg-white hover:border-sky-300 dark:border-slate-800 dark:bg-slate-900'
-            }`}
+            data-testid="dash-card-merged-ativos-desistencias"
+            className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200/90 bg-white px-2 py-1.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900"
           >
-            <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
-              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
-                <Users className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
-                <span>Alunos ativos</span>
-              </span>
-              <span className="text-sm font-black text-[#004A8D] tabular-nums whitespace-nowrap dark:text-sky-400">
-                {metrics.alunosAtivosUnicosCount}
-              </span>
-            </div>
+            <button
+              type="button"
+              data-testid="dash-card-alunos-ativos"
+              aria-pressed={isAlunosAtivosUnicosActive}
+              onClick={() => handleToggleCard('ALUNOS_ATIVOS_UNICOS')}
+              className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
+                isAlunosAtivosUnicosActive
+                  ? 'border-[#004A8D] bg-sky-50/90 ring-1 ring-[#004A8D]/30 dark:border-sky-500 dark:bg-sky-950/60'
+                  : 'border-slate-200/80 bg-slate-50/50 hover:border-sky-300 dark:border-slate-800 dark:bg-slate-800/50'
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                  <Users className="h-3 w-3 shrink-0 text-[#004A8D] dark:text-sky-400" />
+                  <span>Alunos ativos</span>
+                </span>
+                <span className="text-xs font-black text-[#004A8D] tabular-nums dark:text-sky-400">
+                  {metrics.alunosAtivosUnicosCount}
+                </span>
+              </div>
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                  Contratos unificados
+                </span>
+                {isAlunosAtivosUnicosActive && (
+                  <Check className="h-2.5 w-2.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
+                )}
+              </div>
+            </button>
 
-            <div className="flex h-6 items-center justify-between rounded border border-slate-200/80 bg-slate-50/70 px-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-300">
-              <span>Contratos unificados</span>
-              <span className="font-semibold text-slate-800 tabular-nums dark:text-slate-200">
-                {metrics.alunosAtivosUnicosCount} únicos
-              </span>
-            </div>
+            <button
+              type="button"
+              data-testid="dash-card-possiveis-desistencias"
+              aria-pressed={isPossiveisDesistenciasActive}
+              onClick={() => handleToggleCard('POSSIVEIS_DESISTENCIAS')}
+              className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
+                isPossiveisDesistenciasActive
+                  ? 'border-rose-600 bg-rose-50/90 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/60'
+                  : 'border-rose-200/80 bg-rose-50/40 hover:border-rose-400 dark:border-rose-900/60 dark:bg-rose-950/25'
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                  <AlertTriangle className="h-3 w-3 shrink-0 text-rose-600 dark:text-rose-400" />
+                  <span className="truncate">Possíveis desistências</span>
+                </span>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs font-black text-rose-700 tabular-nums dark:text-rose-400">
+                    {metrics.possiveisDesistenciasCount}
+                  </span>
+                  <IndicatorHelpPopover
+                    indicatorId="CONSOLIDADO_ALUNOS_E_DESISTENCIAS"
+                    align="center"
+                  />
+                </div>
+              </div>
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="truncate text-[10px] text-rose-900/90 dark:text-rose-300">
+                  Fin. atraso · S/ apostila · 0%
+                </span>
+                <span className="text-[10px] font-bold text-rose-700 tabular-nums dark:text-rose-400">
+                  {metrics.possiveisDesistenciasPercent.toFixed(1)}%
+                </span>
+              </div>
+            </button>
           </div>
 
-          {/* CARD 3: APOSTILAS */}
+          {/* LINHA 1, CARD 3: APOSTILAS */}
           <div
             data-testid="dash-card-apostila"
             onClick={() => handleToggleCard('APOSTILA_PENDENTE')}
@@ -1598,6 +1695,10 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
               <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
                 <BookOpen className="h-3.5 w-3.5 shrink-0 text-[#004A8D] dark:text-sky-400" />
                 <span>Apostilas</span>
+                <IndicatorHelpPopover
+                  indicatorId="CONSOLIDADO_APOSTILAS"
+                  align="right"
+                />
               </span>
               <span className="text-[11px] font-bold text-emerald-700 tabular-nums whitespace-nowrap dark:text-emerald-400">
                 {metrics.apostilaPercentualEntrega.toFixed(1)}%
@@ -1657,35 +1758,7 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             </div>
           </div>
 
-          {/* CARD 4: POSSÍVEIS DESISTÊNCIAS */}
-          <div
-            data-testid="dash-card-possiveis-desistencias"
-            onClick={() => handleToggleCard('POSSIVEIS_DESISTENCIAS')}
-            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 transition-all ${
-              isPossiveisDesistenciasActive
-                ? 'border-rose-600 bg-rose-50/80 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/40'
-                : 'border-slate-200/90 bg-white hover:border-rose-300 dark:border-slate-800 dark:bg-slate-900'
-            }`}
-          >
-            <div className="flex items-center justify-between gap-2 whitespace-nowrap">
-              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
-                <span>Possíveis desistências</span>
-              </span>
-              <span className="text-sm font-black text-rose-700 tabular-nums whitespace-nowrap dark:text-rose-400">
-                {metrics.possiveisDesistenciasCount}
-              </span>
-            </div>
-
-            <div className="flex h-6 items-center justify-between rounded border border-rose-200/80 bg-rose-50/50 px-2 text-[10px] font-medium text-rose-900 whitespace-nowrap dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
-              <span>Fin. atraso · Sem apostila · 0% freq.</span>
-              {isPossiveisDesistenciasActive && (
-                <Check className="h-2.5 w-2.5 shrink-0 text-rose-700 dark:text-rose-300" />
-              )}
-            </div>
-          </div>
-
-          {/* CARD 5: FINANCEIRO */}
+          {/* LINHA 2, CARD 4: FINANCEIRO */}
           <div
             data-testid="dash-card-financeiro"
             onClick={() => handleToggleCard('FINANCEIRO_EM_ATRASO')}
@@ -1699,6 +1772,10 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
               <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
                 <DollarSign className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
                 <span>Financeiro</span>
+                <IndicatorHelpPopover
+                  indicatorId="CONSOLIDADO_FINANCEIRO"
+                  align="left"
+                />
               </span>
               <span className="text-[11px] font-bold text-emerald-700 tabular-nums whitespace-nowrap dark:text-emerald-400">
                 {metrics.financeiroEmDiaPercent.toFixed(1)}%
@@ -1758,74 +1835,91 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
             </div>
           </div>
 
-          {/* CARD 6: FREQUÊNCIA */}
+          {/* LINHA 2, CARD 5 (UNIFICADO): FREQUÊNCIA & EVASÕES */}
           <div
-            data-testid="dash-card-frequencia"
-            onClick={() => handleToggleCard('FREQUENCIA_TODOS')}
-            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-left transition-all ${
-              isFrequenciaCardActive
-                ? 'border-[#004A8D] bg-sky-50/80 ring-1 ring-[#004A8D]/25 dark:border-sky-500 dark:bg-sky-950/40'
-                : 'border-slate-200/90 bg-white hover:border-sky-300 dark:border-slate-800 dark:bg-slate-900'
-            }`}
+            data-testid="dash-card-merged-frequencia-evasao"
+            className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200/90 bg-white px-2 py-1.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900"
           >
-            <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
-              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
-                <Percent className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                <span>Frequência</span>
-              </span>
-              <span
-                data-testid="dash-freq-average-only"
-                className={`text-sm font-black tabular-nums ${
-                  !metrics.hasFrequencyData
-                    ? 'text-slate-500 dark:text-slate-400'
-                    : metrics.frequenciaPercentual >= 85
-                    ? 'text-emerald-700 dark:text-emerald-400'
-                    : 'text-rose-700 dark:text-rose-400'
-                }`}
-              >
-                {metrics.hasFrequencyData
-                  ? `${metrics.frequenciaPercentual.toFixed(1)}%`
-                  : '0.0%'}
-              </span>
-            </div>
+            <button
+              type="button"
+              data-testid="dash-card-frequencia"
+              aria-pressed={isFrequenciaCardActive}
+              onClick={() => handleToggleCard('FREQUENCIA_TODOS')}
+              className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
+                isFrequenciaCardActive
+                  ? 'border-[#004A8D] bg-sky-50/90 ring-1 ring-[#004A8D]/30 dark:border-sky-500 dark:bg-sky-950/60'
+                  : 'border-slate-200/80 bg-slate-50/50 hover:border-sky-300 dark:border-slate-800 dark:bg-slate-800/50'
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                  <Percent className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  <span>Frequência</span>
+                </span>
+                <span
+                  data-testid="dash-freq-average-only"
+                  className={`text-xs font-black tabular-nums ${
+                    !metrics.hasFrequencyData
+                      ? 'text-slate-500 dark:text-slate-400'
+                      : metrics.frequenciaPercentual >= 85
+                      ? 'text-emerald-700 dark:text-emerald-400'
+                      : 'text-rose-700 dark:text-rose-400'
+                  }`}
+                >
+                  {metrics.hasFrequencyData
+                    ? `${metrics.frequenciaPercentual.toFixed(1)}%`
+                    : '0.0%'}
+                </span>
+              </div>
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                  Presenças / faltas
+                </span>
+                <span className="text-[10px] font-semibold text-slate-800 tabular-nums dark:text-slate-200">
+                  {metrics.presencaRegistrosCount ?? 0}P ·{' '}
+                  {metrics.faltaRegistrosCount ?? 0}F
+                </span>
+              </div>
+            </button>
 
-            <div className="flex h-6 items-center justify-between rounded border border-slate-200/80 bg-slate-50/70 px-2 text-[11px] text-slate-600 dark:border-slate-800 dark:bg-slate-800/60 dark:text-slate-300">
-              <span>Presenças / faltas</span>
-              <span className="font-semibold text-slate-800 tabular-nums dark:text-slate-200">
-                {metrics.presencaRegistrosCount ?? 0}P · {metrics.faltaRegistrosCount ?? 0}F
-              </span>
-            </div>
+            <button
+              type="button"
+              data-testid="dash-card-evasao"
+              aria-pressed={isCardSelected('EVASAO')}
+              onClick={() => handleToggleCard('EVASAO')}
+              className={`flex flex-col justify-between gap-0.5 rounded border px-2 py-1 text-left transition-all ${
+                isCardSelected('EVASAO')
+                  ? 'border-rose-600 bg-rose-50/90 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/60'
+                  : 'border-rose-200/80 bg-rose-50/40 hover:border-rose-400 dark:border-rose-900/60 dark:bg-rose-950/25'
+              }`}
+            >
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="flex items-center gap-1 text-[11px] font-bold text-slate-800 dark:text-slate-100">
+                  <AlertTriangle className="h-3 w-3 shrink-0 text-rose-600 dark:text-rose-400" />
+                  <span>Evasões</span>
+                </span>
+                <div className="flex items-center gap-1">
+                  <span className="text-xs font-black text-rose-700 tabular-nums dark:text-rose-400">
+                    {metrics.evadidosCount}
+                  </span>
+                  <IndicatorHelpPopover
+                    indicatorId="CONSOLIDADO_FREQUENCIA_E_EVASOES"
+                    align="center"
+                  />
+                </div>
+              </div>
+              <div className="flex w-full items-center justify-between gap-1 whitespace-nowrap">
+                <span className="text-[10px] text-rose-900/90 dark:text-rose-300">
+                  Taxa na semana
+                </span>
+                <span className="text-[10px] font-bold text-rose-700 tabular-nums dark:text-rose-400">
+                  {metrics.evadidosPercent.toFixed(1)}%
+                </span>
+              </div>
+            </button>
           </div>
 
-          {/* CARD 7: EVASÕES */}
-          <div
-            data-testid="dash-card-evasao"
-            onClick={() => handleToggleCard('EVASAO')}
-            className={`flex cursor-pointer flex-col justify-between gap-1 rounded-lg border px-2.5 py-1.5 text-left transition-all ${
-              isCardSelected('EVASAO')
-                ? 'border-rose-600 bg-rose-50/80 ring-1 ring-rose-500/30 dark:border-rose-500 dark:bg-rose-950/40'
-                : 'border-slate-200/90 bg-white hover:border-rose-300 dark:border-slate-800 dark:bg-slate-900'
-            }`}
-          >
-            <div className="flex w-full items-center justify-between gap-2 whitespace-nowrap">
-              <span className="flex items-center gap-1 text-xs font-bold text-slate-800 whitespace-nowrap dark:text-slate-100">
-                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
-                <span>Evasões</span>
-              </span>
-              <span className="text-sm font-black text-rose-700 tabular-nums whitespace-nowrap dark:text-rose-400">
-                {metrics.evadidosCount}
-              </span>
-            </div>
-
-            <div className="flex h-6 items-center justify-between rounded border border-rose-200/80 bg-rose-50/50 px-2 text-[11px] text-rose-900 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-300">
-              <span>Taxa na semana</span>
-              <span className="font-bold tabular-nums">
-                {metrics.evadidosPercent.toFixed(1)}%
-              </span>
-            </div>
-          </div>
-
-          {/* CARD 8: PENDÊNCIAS (3+ AULAS S/ APOSTILA & PRESENÇA S/ NPS) */}
+          {/* LINHA 2, CARD 6 (UNIFICADO): SEM APOSTILA (3+ AULAS) & PRESENÇA S/ NPS */}
           <div
             data-testid="dash-card-resumo-aula4-nps"
             className="grid grid-cols-2 gap-1 rounded-lg border border-slate-200/90 bg-white px-2 py-1.5 shadow-2xs dark:border-slate-800 dark:bg-slate-900"
@@ -1876,9 +1970,15 @@ export const DashboardView: React.FC<DashboardViewProps> = React.memo(
                   <Sparkles className="h-3 w-3 shrink-0 text-purple-600 dark:text-purple-400" />
                   <span>Presença s/ NPS</span>
                 </span>
-                {isCardSelected('PRESENCA_SEM_RESPOSTA_NPS') && (
-                  <Check className="h-2.5 w-2.5 shrink-0 text-purple-700 dark:text-purple-400" />
-                )}
+                <div className="flex items-center gap-1">
+                  {isCardSelected('PRESENCA_SEM_RESPOSTA_NPS') && (
+                    <Check className="h-2.5 w-2.5 shrink-0 text-purple-700 dark:text-purple-400" />
+                  )}
+                  <IndicatorHelpPopover
+                    indicatorId="CONSOLIDADO_SEM_APOSTILA_E_NPS"
+                    align="right"
+                  />
+                </div>
               </div>
               <div className="flex w-full items-baseline justify-between gap-1 whitespace-nowrap">
                 <span className="text-[10px] text-purple-900/90 dark:text-purple-300">

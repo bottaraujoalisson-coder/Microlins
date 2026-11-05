@@ -89,24 +89,37 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     setIsSubmitting(true);
     try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ login: cleanLogin, senha: cleanSenha }),
-      });
+      let apiResponse: Response | null = null;
+      let data: any = null;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
+        try {
+          apiResponse = await fetch('/api/auth/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            body: JSON.stringify({ login: cleanLogin, senha: cleanSenha }),
+            signal: controller.signal,
+          });
+          const contentType = apiResponse.headers.get('content-type') || '';
+          if (contentType.includes('application/json')) {
+            data = await apiResponse.json();
+          }
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch {
+        // Ambiente serverless/estático (ex.: Netlify SPA) sem rota Node /api/auth/login ativa
+        apiResponse = null;
+      }
 
-      const contentType = response.headers.get('content-type') || '';
-      const data = contentType.includes('application/json')
-        ? await response.json()
-        : null;
-
-      if (response.ok && data?.ok && data.session) {
+      if (apiResponse && apiResponse.ok && data?.ok && data.session) {
         onLoginSuccess(data.session, data.metadata);
         return;
       }
 
-      if (response.status === 429) {
+      if (apiResponse && apiResponse.status === 429) {
         setErrorMessage(
           data?.error ||
             'Conta temporariamente bloqueada por excesso de tentativas inválidas.'
@@ -121,11 +134,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
       );
       if (supaResult.ok && supaResult.session) {
         onLoginSuccess(supaResult.session, {
-          unidade: supaResult.school?.nome,
-          codigoUnidade: supaResult.school?.codigoPortal,
-          usuarioLogin: supaResult.user?.login,
-          usuarioNomeCompleto: supaResult.user?.nomeCompleto,
-          usuarioCargo: supaResult.user?.cargo,
+          unidade: supaResult.school?.nome || supaResult.session.schoolName,
+          codigoUnidade: supaResult.school?.codigoPortal || supaResult.session.codigoPortal,
+          usuarioLogin: supaResult.user?.login || supaResult.session.login,
+          usuarioNomeCompleto:
+            supaResult.user?.nomeCompleto || supaResult.session.nomeCompleto,
+          usuarioCargo: supaResult.user?.cargo || supaResult.session.cargo,
         });
         return;
       }
@@ -142,11 +156,12 @@ export const LoginView: React.FC<LoginViewProps> = ({
       );
       if (supaResult.ok && supaResult.session) {
         onLoginSuccess(supaResult.session, {
-          unidade: supaResult.school?.nome,
-          codigoUnidade: supaResult.school?.codigoPortal,
-          usuarioLogin: supaResult.user?.login,
-          usuarioNomeCompleto: supaResult.user?.nomeCompleto,
-          usuarioCargo: supaResult.user?.cargo,
+          unidade: supaResult.school?.nome || supaResult.session.schoolName,
+          codigoUnidade: supaResult.school?.codigoPortal || supaResult.session.codigoPortal,
+          usuarioLogin: supaResult.user?.login || supaResult.session.login,
+          usuarioNomeCompleto:
+            supaResult.user?.nomeCompleto || supaResult.session.nomeCompleto,
+          usuarioCargo: supaResult.user?.cargo || supaResult.session.cargo,
         });
         return;
       }
@@ -159,6 +174,19 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setIsSubmitting(false);
     }
   };
+
+  const whatsappSupportText = [
+    'Olá! Preciso de suporte técnico.',
+    '',
+    `Escola: ${schools[0]?.nome || 'Unidade Microlins'}`,
+    '',
+    `Usuário: ${login.trim() || 'Não autenticado (Tela de Login)'}`,
+    '',
+    'Gostaria de solicitar atendimento para uma dúvida ou problema no sistema.',
+  ].join('\n');
+  const whatsappSupportUrl = `https://api.whatsapp.com/send?phone=5518997432487&text=${encodeURIComponent(
+    whatsappSupportText
+  )}`;
 
   return (
     <div
@@ -355,11 +383,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
         </div>
       </main>
 
-      {/* RODAPÉ INSTITUCIONAL MINIMALISTA EM LINHA ÚNICA */}
-      <footer className="shrink-0 border-t border-[#001B3A] bg-[#002855] px-3 py-1 text-[11px] text-slate-200 sm:px-5 dark:border-slate-800 dark:bg-slate-950">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5">
-            <span className="font-medium text-white">
+      {/* RODAPÉ INSTITUCIONAL ALINHADO E PROPORCIONAL */}
+      <footer
+        data-testid="system-footer"
+        className="shrink-0 border-t border-[#001B3A] bg-[#002855] px-4 py-1.5 text-[11px] text-slate-200 sm:px-6 dark:border-slate-800 dark:bg-slate-950"
+      >
+        <div className="mx-auto flex w-full max-w-[1920px] flex-col items-center justify-between gap-1.5 sm:flex-row sm:gap-4">
+          <div className="flex flex-wrap items-center justify-center gap-2.5 sm:justify-start">
+            <span className="font-semibold tracking-tight text-white">
               © 2026 Grupo Realizar Microlins
             </span>
             {onOpenPrivacyPage && (
@@ -367,7 +398,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 type="button"
                 data-testid="footer-privacy-link"
                 onClick={onOpenPrivacyPage}
-                className="inline-flex items-center gap-1 rounded bg-white/10 px-1.5 py-0.5 text-[11px] font-semibold text-sky-200 transition-colors hover:bg-white/20 hover:text-white"
+                className="inline-flex items-center gap-1 rounded-md border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-sky-200 transition-colors hover:bg-white/20 hover:text-white"
               >
                 <ShieldCheck className="h-3 w-3 text-emerald-400" />
                 <span>Privacidade e LGPD</span>
@@ -375,22 +406,24 @@ export const LoginView: React.FC<LoginViewProps> = ({
             )}
           </div>
 
-          <span className="hidden font-medium text-sky-200 sm:inline">
-            Desenvolvido por Alisson Araújo Bott
-          </span>
+          <div className="flex items-center justify-center text-center font-medium text-sky-200">
+            <span>Desenvolvido por Alisson Araújo Bott</span>
+          </div>
 
-          <span className="inline-flex items-center gap-1 text-slate-200">
-            <MessageSquare className="h-3 w-3 shrink-0 text-emerald-400" />
-            <span>Suporte:</span>
+          <div className="flex items-center justify-center gap-1.5 text-slate-200 sm:justify-end">
+            <MessageSquare className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+            <span className="font-medium">Suporte Técnico:</span>
             <a
-              href="https://wa.me/5518997432487"
+              href={whatsappSupportUrl}
               target="_blank"
               rel="noopener noreferrer"
-              className="font-semibold text-white underline decoration-sky-400/70 underline-offset-2 transition-colors hover:text-sky-200"
+              data-testid="footer-whatsapp-support-link"
+              className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-bold text-white underline decoration-emerald-400/80 underline-offset-2 transition-colors hover:bg-white/10 hover:text-emerald-300"
+              title="Abrir conversa de suporte técnico no WhatsApp"
             >
               (18) 99743-2487
             </a>
-          </span>
+          </div>
         </div>
       </footer>
     </div>

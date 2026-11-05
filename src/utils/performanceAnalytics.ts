@@ -1532,7 +1532,8 @@ export function evaluateStudentAttendance(
   currentTimeMinutes: number = getBrasiliaCurrentMinutes(),
   manualAttendanceOverrides: Record<number, AttendanceStatus> = {},
   activeNpsInvitations: ActiveNpsInvitation[] = INITIAL_ACTIVE_NPS_INVITATIONS,
-  referenceWeekday?: string
+  referenceWeekday?: string,
+  hasPeriodClosureConfirmed = true
 ): EvaluatedStudentRecord {
   const startHour = extractRecordStartHour(record, 'AGENDADO') ?? 8;
   const scheduledStartMinutes = parseTimeToMinutes(
@@ -1582,7 +1583,7 @@ export function evaluateStudentAttendance(
       Boolean(record.inicio && record.inicio.trim() !== '') ||
       Boolean(record.fim && record.fim.trim() !== ''));
 
-  // Prioridade 2 (após a aula ter chegado na semana): Sistema informa FALTA
+  // Prioridade 2 (após a aula ter chegado na semana): Sistema informa FALTA explícita
   const hasSystemAbsence =
     hasClassTimeArrivedInWeek &&
     !hasSystemPresence &&
@@ -1590,6 +1591,17 @@ export function evaluateStudentAttendance(
       record.statusSistema === 'FALTA' ||
       rawStatusStr === 'FALTA' ||
       rawInfoAulaStr === 'FALTA');
+
+  // Regra 5.2: Proteção contra falso-positivo de falta quando a sincronização do período ainda não ocorreu
+  // ou quando o registro está explicitamente marcado como NAO_REGISTRADO sem fechamento confirmado do período.
+  const isExplicitlyUnsynced =
+    record.statusSistema === 'NAO_REGISTRADO' ||
+    (!hasPeriodClosureConfirmed &&
+      !hasSystemPresence &&
+      !hasSystemAbsence &&
+      (rawInfoAulaStr === 'NÃO REGISTRADO' ||
+        rawInfoAulaStr === 'NAO REGISTRADO' ||
+        rawInfoAulaStr === ''));
 
   let attendanceStatus: AttendanceStatus;
   let scheduleStage: ScheduleStage;
@@ -1627,6 +1639,11 @@ export function evaluateStudentAttendance(
     attendanceStatus = 'Falta';
     scheduleStage = 'FALTA_CONTABILIZADA';
     scheduleStageLabel = 'Falta';
+  } else if (isExplicitlyUnsynced) {
+    // Período/turno ainda não sincronizado ou sem fechamento no Portal: não fabricar falta automática
+    attendanceStatus = 'Não iniciada';
+    scheduleStage = 'HORARIO_FUTURO';
+    scheduleStageLabel = 'Aguardando sincronização';
   } else if (dayRelation === 'PAST_DAY') {
     // Dia anterior da mesma semana já encerrado sem presença
     attendanceStatus = 'Falta';
@@ -1899,16 +1916,63 @@ export function evaluateAllStudentsAttendance(
   // Aquecer o índice anual de NPS uma única vez antes do loop
   getOrBuildAnnualNpsIndex(activeNpsInvitations, CURRENT_TARGET_YEAR_CACHE);
 
+  const effectiveRefWeekday =
+    referenceWeekday !== undefined && referenceWeekday.trim() !== ''
+      ? referenceWeekday.trim()
+      : getCurrentBrasiliaWeekdayLabel();
+
+  // Verificar fechamento/sincronização por (diaSemana, turno) para evitar que um turno inteiro
+  // ainda não sincronizado pelo Portal no dia atual (ex: 100% dos registros do turno da Tarde com
+  // infoAula === 'Não registrado' e sem nenhum P/F) transforme todos os alunos da tarde em Falta.
+  const shiftStats = new Map<string, { total: number; confirmed: number }>();
+  for (const r of records) {
+    const day = (r.diaSemana || PORTAL_METADATA.diaSemana).trim();
+    const startH = extractRecordStartHour(r, 'AGENDADO') ?? 8;
+    const shift = r.turno || (startH < 12 ? 'Manhã' : startH < 18 ? 'Tarde' : 'Noite');
+    const shiftKey = `${day}::${shift}`;
+    const entry = shiftStats.get(shiftKey) || { total: 0, confirmed: 0 };
+    entry.total++;
+    const infoLower = String(r.infoAula || '').trim().toLowerCase();
+    const hasConfirmedPortalSignal =
+      r.presencaOuFalta === 'P' ||
+      r.presencaOuFalta === 'F' ||
+      r.status === 'FINALIZADO' ||
+      r.status === 'INICIADO' ||
+      r.statusSistema === 'PRESENCA' ||
+      r.statusSistema === 'FALTA' ||
+      Boolean(r.inicio && r.inicio.trim() !== '') ||
+      Boolean(r.fim && r.fim.trim() !== '') ||
+      (infoLower !== '' && infoLower !== 'não registrado' && infoLower !== 'nao registrado');
+    if (hasConfirmedPortalSignal) {
+      entry.confirmed++;
+    }
+    shiftStats.set(shiftKey, entry);
+  }
+
   for (const r of records) {
     if (seenIds.has(r.id)) continue;
     seenIds.add(r.id);
+    const day = (r.diaSemana || PORTAL_METADATA.diaSemana).trim();
+    const startH = extractRecordStartHour(r, 'AGENDADO') ?? 8;
+    const shift = r.turno || (startH < 12 ? 'Manhã' : startH < 18 ? 'Tarde' : 'Noite');
+    const shiftKey = `${day}::${shift}`;
+    const st = shiftStats.get(shiftKey);
+    const dayRel = compareWeekdayWithCurrent(day, effectiveRefWeekday);
+    // Se estamos no dia atual (CURRENT_DAY) em um turno com >= 3 alunos agendados e ZERO confirmações do Portal
+    // (todos "Não registrado"), o turno ainda não foi sincronizado/fechado pelo Portal.
+    const hasPeriodClosureConfirmed =
+      dayRel === 'CURRENT_DAY' && st && st.total >= 3 && st.confirmed === 0
+        ? false
+        : true;
+
     uniqueSchedules.push(
       evaluateStudentAttendance(
         r,
         currentTimeMinutes,
         manualAttendanceOverrides,
         activeNpsInvitations,
-        referenceWeekday
+        referenceWeekday,
+        hasPeriodClosureConfirmed
       )
     );
   }
@@ -3753,6 +3817,7 @@ export type ConsolidatedSortField =
   | 'nomeCompleto'
   | 'contrato'
   | 'formacao'
+  | 'educador'
   | 'capacitacao'
   | 'cadNome'
   | 'unidade'
@@ -3788,6 +3853,7 @@ export interface DashboardFilterCriteria {
   nomeFilter?: string;
   contratoFilter?: string;
   formacao?: string;
+  educador?: string;
   capacitacao?: string;
   cadNome?: string;
   unidade?: string;
@@ -3827,6 +3893,8 @@ export interface ConsolidatedDashboardStudent {
   categoriaCurso: CourseCategoryType;
   formacao: string;
   formacaoRaw: string;
+  educador: string;
+  educadores: string[];
   capacitacao: string;
   capacitacoes: string[];
   contratosComCapacitacao: string[];
@@ -3944,6 +4012,12 @@ export function sortConsolidatedStudents(
       case 'capacitacao':
         cmp = (a.formacao || a.capacitacao).localeCompare(
           b.formacao || b.capacitacao,
+          'pt-BR'
+        );
+        break;
+      case 'educador':
+        cmp = (a.educador || 'Sem vínculo válido').localeCompare(
+          b.educador || 'Sem vínculo válido',
           'pt-BR'
         );
         break;
@@ -4215,6 +4289,17 @@ export function computeDashboardAnalytics(
     const contratosComFormacao = contratos.map((c) => `#${c} (${formacao})`);
     const contratosComCapacitacao = contratosComFormacao;
 
+    const rawEducadores = Array.from(
+      new Set(
+        schedules
+          .map((s) => (s.educador || s.professor || '').trim())
+          .filter((ed) => ed.length > 0 && ed !== 'A definir' && ed !== 'Não informado')
+      )
+    );
+    const educadores =
+      rawEducadores.length > 0 ? rawEducadores : ['Sem vínculo válido'];
+    const educador = educadores.join(' · ');
+
     const cadIds = Array.from(
       new Set(schedules.map((s) => s.cadId || 'CAD-PP-01'))
     );
@@ -4359,6 +4444,8 @@ export function computeDashboardAnalytics(
       categoriaCurso,
       formacao,
       formacaoRaw: primary.formacao || formacao,
+      educador,
+      educadores,
       capacitacao,
       capacitacoes,
       contratosComCapacitacao,
@@ -4423,6 +4510,10 @@ export function computeDashboardAnalytics(
       : filters.capacitacao && filters.capacitacao !== 'TODAS'
       ? filters.capacitacao
       : null;
+  const educadorFilter =
+    filters.educador && filters.educador !== 'TODOS' && filters.educador !== 'TODAS'
+      ? filters.educador
+      : null;
   const cadNomeFilter =
     filters.cadNome && filters.cadNome !== 'TODOS' && filters.cadNome !== 'TODAS'
       ? filters.cadNome
@@ -4452,7 +4543,8 @@ export function computeDashboardAnalytics(
         c.toLowerCase().includes(searchNorm.replace(/^#/, ''))
       );
       const matchesFormacao = st.formacao.toLowerCase().includes(searchNorm);
-      if (!matchesName && !matchesContract && !matchesFormacao) {
+      const matchesEducador = st.educador.toLowerCase().includes(searchNorm);
+      if (!matchesName && !matchesContract && !matchesFormacao && !matchesEducador) {
         return false;
       }
     }
@@ -4479,6 +4571,12 @@ export function computeDashboardAnalytics(
         st.capacitacao !== formacaoFilter &&
         !st.capacitacoes.includes(formacaoFilter)
       ) {
+        return false;
+      }
+    }
+
+    if (educadorFilter) {
+      if (st.educador !== educadorFilter && !st.educadores.includes(educadorFilter)) {
         return false;
       }
     }
